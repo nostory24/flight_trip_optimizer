@@ -639,185 +639,193 @@ except Exception as exc:
 # -----------------------------
 def ensure_trip_table():
     """
-    Create a named-trip table in either PostgreSQL or SQLite.
-    Stores a complete snapshot of current generated state + saved offers.
+    Create named-trip table using the same SQLAlchemy engine used by v3.9.
+    Works for both PostgreSQL and SQLite.
     """
-    if CLOUD_DB:
-        with pg_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS trip_projects (
-                        trip_id TEXT PRIMARY KEY,
-                        trip_name TEXT NOT NULL UNIQUE,
-                        snapshot_json TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                """)
-            conn.commit()
-    else:
-        with db_connect() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS trip_projects (
-                    trip_id TEXT PRIMARY KEY,
-                    trip_name TEXT NOT NULL UNIQUE,
-                    snapshot_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            conn.commit()
+    if DB_INIT_ERROR:
+        return
+    with engine.begin() as conn:
+        conn.execute(sql_text("""
+            CREATE TABLE IF NOT EXISTS trip_projects (
+                trip_id VARCHAR(120) PRIMARY KEY,
+                trip_name VARCHAR(255) NOT NULL UNIQUE,
+                snapshot_json TEXT NOT NULL,
+                created_at VARCHAR(40) NOT NULL,
+                updated_at VARCHAR(40) NOT NULL
+            )
+        """))
 
 def _make_trip_id():
     return datetime.now().strftime("trip_%Y%m%d_%H%M%S_%f")
 
 def current_trip_snapshot():
     return {
-        "generated": serialize_generated(st.session_state.get("generated")),
-        "offers": st.session_state.get("offers", []),
+        "generated": _jsonable(st.session_state.get("generated")),
+        "offers": _jsonable(st.session_state.get("offers", [])),
     }
 
 def save_named_trip(trip_name, trip_id=None):
+    if DB_INIT_ERROR:
+        raise RuntimeError(f"DB 초기화 오류: {DB_INIT_ERROR}")
+
     trip_name = (trip_name or "").strip()
     if not trip_name:
         raise ValueError("여행 이름을 입력하세요.")
 
-    snapshot = json.dumps(current_trip_snapshot(), ensure_ascii=False, default=str)
+    snapshot = json.dumps(current_trip_snapshot(), ensure_ascii=False)
     now = datetime.now().isoformat(timespec="seconds")
     if not trip_id:
         trip_id = _make_trip_id()
 
-    if CLOUD_DB:
-        with pg_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO trip_projects(trip_id, trip_name, snapshot_json, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (trip_id) DO UPDATE SET
-                        trip_name = EXCLUDED.trip_name,
-                        snapshot_json = EXCLUDED.snapshot_json,
-                        updated_at = EXCLUDED.updated_at
-                """, (trip_id, trip_name, snapshot, now, now))
-            conn.commit()
-    else:
-        with db_connect() as conn:
-            conn.execute("""
-                INSERT INTO trip_projects(trip_id, trip_name, snapshot_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(trip_id) DO UPDATE SET
-                    trip_name=excluded.trip_name,
-                    snapshot_json=excluded.snapshot_json,
-                    updated_at=excluded.updated_at
-            """, (trip_id, trip_name, snapshot, now, now))
-            conn.commit()
+    with engine.begin() as conn:
+        # Check duplicate name belonging to another trip.
+        duplicate = conn.execute(
+            sql_text("""
+                SELECT trip_id
+                FROM trip_projects
+                WHERE trip_name=:trip_name AND trip_id<>:trip_id
+            """),
+            {"trip_name": trip_name, "trip_id": trip_id},
+        ).mappings().first()
+        if duplicate:
+            raise ValueError("같은 이름의 여행이 이미 있습니다.")
+
+        result = conn.execute(
+            sql_text("""
+                UPDATE trip_projects
+                SET trip_name=:trip_name,
+                    snapshot_json=:snapshot,
+                    updated_at=:updated_at
+                WHERE trip_id=:trip_id
+            """),
+            {
+                "trip_name": trip_name,
+                "snapshot": snapshot,
+                "updated_at": now,
+                "trip_id": trip_id,
+            },
+        )
+
+        if result.rowcount == 0:
+            conn.execute(
+                sql_text("""
+                    INSERT INTO trip_projects(
+                        trip_id, trip_name, snapshot_json, created_at, updated_at
+                    )
+                    VALUES(
+                        :trip_id, :trip_name, :snapshot, :created_at, :updated_at
+                    )
+                """),
+                {
+                    "trip_id": trip_id,
+                    "trip_name": trip_name,
+                    "snapshot": snapshot,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
     return trip_id
 
 def list_named_trips():
-    if CLOUD_DB:
-        with pg_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT trip_id, trip_name, created_at, updated_at
-                    FROM trip_projects
-                    ORDER BY updated_at DESC
-                """)
-                rows = cur.fetchall()
-        return [
-            {"trip_id": r[0], "trip_name": r[1], "created_at": r[2], "updated_at": r[3]}
-            for r in rows
-        ]
-    else:
-        with db_connect() as conn:
-            rows = conn.execute("""
+    if DB_INIT_ERROR:
+        return []
+    with engine.begin() as conn:
+        rows = conn.execute(
+            sql_text("""
                 SELECT trip_id, trip_name, created_at, updated_at
                 FROM trip_projects
                 ORDER BY updated_at DESC
-            """).fetchall()
-        return [
-            {
-                "trip_id": r["trip_id"],
-                "trip_name": r["trip_name"],
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-            }
-            for r in rows
-        ]
+            """)
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 def load_named_trip(trip_id):
-    if CLOUD_DB:
-        with pg_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT trip_name, snapshot_json FROM trip_projects WHERE trip_id=%s",
-                    (trip_id,)
-                )
-                row = cur.fetchone()
-        if not row:
-            return None
-        trip_name, payload = row
-    else:
-        with db_connect() as conn:
-            row = conn.execute(
-                "SELECT trip_name, snapshot_json FROM trip_projects WHERE trip_id=?",
-                (trip_id,)
-            ).fetchone()
-        if not row:
-            return None
-        trip_name, payload = row["trip_name"], row["snapshot_json"]
+    if DB_INIT_ERROR:
+        raise RuntimeError(f"DB 초기화 오류: {DB_INIT_ERROR}")
 
-    data = json.loads(payload)
-    generated = deserialize_generated(data.get("generated"))
-    offers = data.get("offers", [])
+    with engine.begin() as conn:
+        row = conn.execute(
+            sql_text("""
+                SELECT trip_name, snapshot_json
+                FROM trip_projects
+                WHERE trip_id=:trip_id
+            """),
+            {"trip_id": trip_id},
+        ).mappings().first()
+
+    if not row:
+        return None
+
+    data = json.loads(row["snapshot_json"])
+    generated = _restore_objects(data.get("generated"))
+    offers = _restore_objects(data.get("offers", []))
 
     st.session_state.generated = generated
     st.session_state.offers = offers
     st.session_state.active_trip_id = trip_id
-    st.session_state.active_trip_name = trip_name
+    st.session_state.active_trip_name = row["trip_name"]
 
-    # Also update current autosave state.
-    autosave()
-    return trip_name
+    # Keep current autosave state in sync too.
+    save_state("generated", generated)
+    save_all_offers(offers)
+    return row["trip_name"]
 
 def rename_named_trip(trip_id, new_name):
+    if DB_INIT_ERROR:
+        raise RuntimeError(f"DB 초기화 오류: {DB_INIT_ERROR}")
+
     new_name = (new_name or "").strip()
     if not new_name:
         raise ValueError("새 이름을 입력하세요.")
+
     now = datetime.now().isoformat(timespec="seconds")
 
-    if CLOUD_DB:
-        with pg_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE trip_projects SET trip_name=%s, updated_at=%s WHERE trip_id=%s",
-                    (new_name, now, trip_id)
-                )
-            conn.commit()
-    else:
-        with db_connect() as conn:
-            conn.execute(
-                "UPDATE trip_projects SET trip_name=?, updated_at=? WHERE trip_id=?",
-                (new_name, now, trip_id)
-            )
-            conn.commit()
+    with engine.begin() as conn:
+        duplicate = conn.execute(
+            sql_text("""
+                SELECT trip_id
+                FROM trip_projects
+                WHERE trip_name=:trip_name AND trip_id<>:trip_id
+            """),
+            {"trip_name": new_name, "trip_id": trip_id},
+        ).mappings().first()
+        if duplicate:
+            raise ValueError("같은 이름의 여행이 이미 있습니다.")
+
+        conn.execute(
+            sql_text("""
+                UPDATE trip_projects
+                SET trip_name=:trip_name, updated_at=:updated_at
+                WHERE trip_id=:trip_id
+            """),
+            {
+                "trip_name": new_name,
+                "updated_at": now,
+                "trip_id": trip_id,
+            },
+        )
 
 def delete_named_trip(trip_id):
-    if CLOUD_DB:
-        with pg_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM trip_projects WHERE trip_id=%s", (trip_id,))
-            conn.commit()
-    else:
-        with db_connect() as conn:
-            conn.execute("DELETE FROM trip_projects WHERE trip_id=?", (trip_id,))
-            conn.commit()
+    if DB_INIT_ERROR:
+        raise RuntimeError(f"DB 초기화 오류: {DB_INIT_ERROR}")
+
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text("DELETE FROM trip_projects WHERE trip_id=:trip_id"),
+            {"trip_id": trip_id},
+        )
 
 def save_active_trip_if_any():
     trip_id = st.session_state.get("active_trip_id")
     trip_name = st.session_state.get("active_trip_name")
-    if trip_id and trip_name:
+    if trip_id and trip_name and not DB_INIT_ERROR:
         save_named_trip(trip_name, trip_id=trip_id)
 
-ensure_trip_table()
+try:
+    ensure_trip_table()
+except Exception as exc:
+    if not DB_INIT_ERROR:
+        DB_INIT_ERROR = str(exc)
 
 # -----------------------------
 # Session
