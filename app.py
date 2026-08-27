@@ -603,6 +603,8 @@ def autosave():
         return
     save_state("generated", st.session_state.get("generated"))
     save_all_offers(st.session_state.get("offers", []))
+    if "save_active_trip_if_any" in globals():
+        save_active_trip_if_any()
 
 def export_snapshot_json():
     snapshot = {
@@ -631,6 +633,192 @@ try:
 except Exception as exc:
     DB_INIT_ERROR = str(exc)
 
+
+# -----------------------------
+# Named trip projects
+# -----------------------------
+def ensure_trip_table():
+    """
+    Create a named-trip table in either PostgreSQL or SQLite.
+    Stores a complete snapshot of current generated state + saved offers.
+    """
+    if USE_POSTGRES:
+        with pg_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS trip_projects (
+                        trip_id TEXT PRIMARY KEY,
+                        trip_name TEXT NOT NULL UNIQUE,
+                        snapshot_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+            conn.commit()
+    else:
+        with db_connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS trip_projects (
+                    trip_id TEXT PRIMARY KEY,
+                    trip_name TEXT NOT NULL UNIQUE,
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+
+def _make_trip_id():
+    return datetime.now().strftime("trip_%Y%m%d_%H%M%S_%f")
+
+def current_trip_snapshot():
+    return {
+        "generated": serialize_generated(st.session_state.get("generated")),
+        "offers": st.session_state.get("offers", []),
+    }
+
+def save_named_trip(trip_name, trip_id=None):
+    trip_name = (trip_name or "").strip()
+    if not trip_name:
+        raise ValueError("여행 이름을 입력하세요.")
+
+    snapshot = json.dumps(current_trip_snapshot(), ensure_ascii=False, default=str)
+    now = datetime.now().isoformat(timespec="seconds")
+    if not trip_id:
+        trip_id = _make_trip_id()
+
+    if USE_POSTGRES:
+        with pg_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trip_projects(trip_id, trip_name, snapshot_json, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (trip_id) DO UPDATE SET
+                        trip_name = EXCLUDED.trip_name,
+                        snapshot_json = EXCLUDED.snapshot_json,
+                        updated_at = EXCLUDED.updated_at
+                """, (trip_id, trip_name, snapshot, now, now))
+            conn.commit()
+    else:
+        with db_connect() as conn:
+            conn.execute("""
+                INSERT INTO trip_projects(trip_id, trip_name, snapshot_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(trip_id) DO UPDATE SET
+                    trip_name=excluded.trip_name,
+                    snapshot_json=excluded.snapshot_json,
+                    updated_at=excluded.updated_at
+            """, (trip_id, trip_name, snapshot, now, now))
+            conn.commit()
+    return trip_id
+
+def list_named_trips():
+    if USE_POSTGRES:
+        with pg_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT trip_id, trip_name, created_at, updated_at
+                    FROM trip_projects
+                    ORDER BY updated_at DESC
+                """)
+                rows = cur.fetchall()
+        return [
+            {"trip_id": r[0], "trip_name": r[1], "created_at": r[2], "updated_at": r[3]}
+            for r in rows
+        ]
+    else:
+        with db_connect() as conn:
+            rows = conn.execute("""
+                SELECT trip_id, trip_name, created_at, updated_at
+                FROM trip_projects
+                ORDER BY updated_at DESC
+            """).fetchall()
+        return [
+            {
+                "trip_id": r["trip_id"],
+                "trip_name": r["trip_name"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+def load_named_trip(trip_id):
+    if USE_POSTGRES:
+        with pg_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT trip_name, snapshot_json FROM trip_projects WHERE trip_id=%s",
+                    (trip_id,)
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        trip_name, payload = row
+    else:
+        with db_connect() as conn:
+            row = conn.execute(
+                "SELECT trip_name, snapshot_json FROM trip_projects WHERE trip_id=?",
+                (trip_id,)
+            ).fetchone()
+        if not row:
+            return None
+        trip_name, payload = row["trip_name"], row["snapshot_json"]
+
+    data = json.loads(payload)
+    generated = deserialize_generated(data.get("generated"))
+    offers = data.get("offers", [])
+
+    st.session_state.generated = generated
+    st.session_state.offers = offers
+    st.session_state.active_trip_id = trip_id
+    st.session_state.active_trip_name = trip_name
+
+    # Also update current autosave state.
+    autosave()
+    return trip_name
+
+def rename_named_trip(trip_id, new_name):
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise ValueError("새 이름을 입력하세요.")
+    now = datetime.now().isoformat(timespec="seconds")
+
+    if USE_POSTGRES:
+        with pg_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE trip_projects SET trip_name=%s, updated_at=%s WHERE trip_id=%s",
+                    (new_name, now, trip_id)
+                )
+            conn.commit()
+    else:
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE trip_projects SET trip_name=?, updated_at=? WHERE trip_id=?",
+                (new_name, now, trip_id)
+            )
+            conn.commit()
+
+def delete_named_trip(trip_id):
+    if USE_POSTGRES:
+        with pg_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM trip_projects WHERE trip_id=%s", (trip_id,))
+            conn.commit()
+    else:
+        with db_connect() as conn:
+            conn.execute("DELETE FROM trip_projects WHERE trip_id=?", (trip_id,))
+            conn.commit()
+
+def save_active_trip_if_any():
+    trip_id = st.session_state.get("active_trip_id")
+    trip_name = st.session_state.get("active_trip_name")
+    if trip_id and trip_name:
+        save_named_trip(trip_name, trip_id=trip_id)
+
+ensure_trip_table()
+
 # -----------------------------
 # Session
 # -----------------------------
@@ -639,8 +827,107 @@ if "offers" not in st.session_state:
 if "generated" not in st.session_state:
     st.session_state.generated = None if DB_INIT_ERROR else load_state("generated", None)
 
+if "active_trip_id" not in st.session_state:
+    st.session_state.active_trip_id = None
+if "active_trip_name" not in st.session_state:
+    st.session_state.active_trip_name = None
+
 st.title("✈️ Flight Trip Optimizer")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
+
+with st.sidebar:
+    st.markdown("### 🧳 여행 데이터")
+
+    active_name = st.session_state.get("active_trip_name")
+    if active_name:
+        st.success(f"현재 여행: {active_name}")
+    else:
+        st.info("현재 여행: 이름 없음")
+
+    new_trip_name = st.text_input(
+        "현재 작업을 여행으로 저장",
+        value=active_name or "",
+        placeholder="예: 2026 터키-그리스"
+    )
+
+    c_save1, c_save2 = st.columns(2)
+    with c_save1:
+        if st.button("💾 저장", use_container_width=True):
+            try:
+                current_id = st.session_state.get("active_trip_id")
+                saved_id = save_named_trip(new_trip_name, trip_id=current_id)
+                st.session_state.active_trip_id = saved_id
+                st.session_state.active_trip_name = new_trip_name.strip()
+                st.success("여행 저장 완료")
+                st.rerun()
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
+
+    with c_save2:
+        if st.button("➕ 새 여행", use_container_width=True):
+            st.session_state.generated = None
+            st.session_state.offers = []
+            st.session_state.active_trip_id = None
+            st.session_state.active_trip_name = None
+            autosave()
+            st.rerun()
+
+    trips = list_named_trips()
+    if trips:
+        trip_labels = [
+            f'{t["trip_name"]}  ·  {str(t["updated_at"])[:16]}'
+            for t in trips
+        ]
+        selected_label = st.selectbox(
+            "저장된 여행",
+            trip_labels,
+            key="saved_trip_selector"
+        )
+        selected_trip = trips[trip_labels.index(selected_label)]
+
+        if st.button("📂 이 여행 불러오기", use_container_width=True):
+            try:
+                name = load_named_trip(selected_trip["trip_id"])
+                if name:
+                    st.success(f"{name} 불러오기 완료")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"불러오기 실패: {e}")
+
+        with st.expander("여행 이름 변경 / 삭제", expanded=False):
+            rename_value = st.text_input(
+                "새 여행 이름",
+                value=selected_trip["trip_name"],
+                key="trip_rename_value"
+            )
+            if st.button("이름 변경", use_container_width=True):
+                try:
+                    rename_named_trip(selected_trip["trip_id"], rename_value)
+                    if st.session_state.get("active_trip_id") == selected_trip["trip_id"]:
+                        st.session_state.active_trip_name = rename_value.strip()
+                    st.success("이름 변경 완료")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"이름 변경 실패: {e}")
+
+            confirm_delete = st.checkbox(
+                "삭제 확인",
+                key="trip_delete_confirm"
+            )
+            if st.button("🗑️ 여행 삭제", use_container_width=True, disabled=not confirm_delete):
+                try:
+                    delete_named_trip(selected_trip["trip_id"])
+                    if st.session_state.get("active_trip_id") == selected_trip["trip_id"]:
+                        st.session_state.active_trip_id = None
+                        st.session_state.active_trip_name = None
+                    st.success("여행 삭제 완료")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"삭제 실패: {e}")
+    else:
+        st.caption("저장된 여행이 없습니다.")
+
+    st.divider()
 
 with st.sidebar:
     st.markdown("### 💾 데이터 저장")
