@@ -8,7 +8,7 @@ import sqlite3
 import json
 import shutil
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from dataclasses import dataclass
 from typing import List
 
@@ -603,13 +603,73 @@ with tab1:
         st.dataframe(pd.DataFrame(guide_rows), use_container_width=True, hide_index=True)
 
     departure_dates_by_city = {}
-    all_nodes = [home] + visits
-    defaults = [date(2026,12,24), date(2026,12,28), date(2027,1,2), date(2027,1,5)]
-    cols = st.columns(max(1, len(all_nodes)))
-    for i, node in enumerate(all_nodes):
-        with cols[i]:
-            d = st.date_input(f"{airport_label(node)} 출발", defaults[min(i, len(defaults)-1)], key=f"dep_{node}_{i}")
-            departure_dates_by_city[node] = d.isoformat()
+    arrival_dates_by_city = {}
+
+    st.markdown("### 🗓️ 도시별 도착 / 출발 일정")
+    st.caption(
+        "각 방문 도시의 도착일과 출발일을 입력하세요. "
+        "항공권 검색 날짜는 출발일을 기준으로 생성하고, 도착일은 체류 일정 확인에 사용합니다."
+    )
+
+    default_home_depart = date(2026, 12, 23)
+    default_visit_arrivals = [
+        date(2026, 12, 24),
+        date(2026, 12, 29),
+        date(2027, 1, 3),
+        date(2027, 1, 6),
+    ]
+    default_visit_departures = [
+        date(2026, 12, 28),
+        date(2027, 1, 2),
+        date(2027, 1, 5),
+        date(2027, 1, 8),
+    ]
+
+    c_home1, c_home2 = st.columns(2)
+    with c_home1:
+        home_depart = st.date_input(
+            f"{airport_label(home)} 출발",
+            default_home_depart,
+            key="home_departure_date"
+        )
+        departure_dates_by_city[home] = home_depart.isoformat()
+
+    default_final_home_arrival = (
+        default_visit_departures[min(max(len(visits)-1, 0), len(default_visit_departures)-1)] + timedelta(days=1)
+        if visits else default_home_depart + timedelta(days=1)
+    )
+
+    with c_home2:
+        home_arrive = st.date_input(
+            f"{airport_label(home)} 최종 도착",
+            default_final_home_arrival,
+            key="home_final_arrival_date"
+        )
+        arrival_dates_by_city[home] = home_arrive.isoformat()
+
+    if visits:
+        for i, node in enumerate(visits):
+            c_arr, c_dep = st.columns(2)
+            with c_arr:
+                arr_default = default_visit_arrivals[min(i, len(default_visit_arrivals)-1)]
+                arr = st.date_input(
+                    f"{airport_label(node)} 도착",
+                    arr_default,
+                    key=f"arr_{node}_{i}"
+                )
+                arrival_dates_by_city[node] = arr.isoformat()
+
+            with c_dep:
+                dep_default = default_visit_departures[min(i, len(default_visit_departures)-1)]
+                dep = st.date_input(
+                    f"{airport_label(node)} 출발",
+                    dep_default,
+                    key=f"dep_{node}_{i}"
+                )
+                departure_dates_by_city[node] = dep.isoformat()
+
+            if dep < arr:
+                st.error(f"{airport_label(node)} 출발일은 도착일보다 빠를 수 없습니다.")
 
     c4, c5, c6 = st.columns(3)
     with c4:
@@ -618,6 +678,26 @@ with tab1:
         max_extra = st.number_input("추가 이동 최대 leg", 0, 6, max(1, len(visits)-1))
     with c6:
         topn = st.selectbox("최종 표시 Top N", [5,10,20,50], index=1)
+
+    if visits:
+        schedule_rows = [{
+            "도시": airport_label(home),
+            "도착": "-",
+            "출발": departure_dates_by_city.get(home, "")
+        }]
+        for city in visits:
+            schedule_rows.append({
+                "도시": airport_label(city),
+                "도착": arrival_dates_by_city.get(city, ""),
+                "출발": departure_dates_by_city.get(city, "")
+            })
+        schedule_rows.append({
+            "도시": airport_label(home),
+            "도착": arrival_dates_by_city.get(home, ""),
+            "출발": "-"
+        })
+        with st.expander("📅 입력한 전체 여행 일정 보기", expanded=True):
+            st.dataframe(pd.DataFrame(schedule_rows), use_container_width=True, hide_index=True)
 
     if st.button("경로·발권 후보 생성", type="primary"):
         routes = generate_physical_routes(home, visits, int(max_revisit), int(max_extra))
@@ -633,8 +713,14 @@ with tab1:
                     "pattern_id": f"R{ridx}-P{pidx}"
                 })
         st.session_state.generated = {
-            "home": home, "visits": visits, "dates": departure_dates_by_city,
-            "flex": flex, "topn": topn, "patterns": generated
+            "home": home,
+            "visits": visits,
+            "dates": departure_dates_by_city,
+            "arrival_dates": arrival_dates_by_city,
+            "home_final_arrival": arrival_dates_by_city.get(home),
+            "flex": flex,
+            "topn": topn,
+            "patterns": generated
         }
         autosave()
         st.success(f"Physical route {len(routes)}개 / 발권 패턴 {len(generated)}개 생성 · 자동저장 완료")
