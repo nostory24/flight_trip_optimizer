@@ -642,7 +642,7 @@ def ensure_trip_table():
     Create a named-trip table in either PostgreSQL or SQLite.
     Stores a complete snapshot of current generated state + saved offers.
     """
-    if USE_POSTGRES:
+    if CLOUD_DB:
         with pg_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -687,7 +687,7 @@ def save_named_trip(trip_name, trip_id=None):
     if not trip_id:
         trip_id = _make_trip_id()
 
-    if USE_POSTGRES:
+    if CLOUD_DB:
         with pg_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -713,7 +713,7 @@ def save_named_trip(trip_name, trip_id=None):
     return trip_id
 
 def list_named_trips():
-    if USE_POSTGRES:
+    if CLOUD_DB:
         with pg_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -744,7 +744,7 @@ def list_named_trips():
         ]
 
 def load_named_trip(trip_id):
-    if USE_POSTGRES:
+    if CLOUD_DB:
         with pg_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -784,7 +784,7 @@ def rename_named_trip(trip_id, new_name):
         raise ValueError("새 이름을 입력하세요.")
     now = datetime.now().isoformat(timespec="seconds")
 
-    if USE_POSTGRES:
+    if CLOUD_DB:
         with pg_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -801,7 +801,7 @@ def rename_named_trip(trip_id, new_name):
             conn.commit()
 
 def delete_named_trip(trip_id):
-    if USE_POSTGRES:
+    if CLOUD_DB:
         with pg_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM trip_projects WHERE trip_id=%s", (trip_id,))
