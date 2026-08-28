@@ -105,28 +105,66 @@ def skyscanner_multicity_url(legs: List[Leg]):
 def route_key(route):
     return " → ".join(airport_label(x) for x in route)
 
-def generate_physical_routes(home: str, visits: List[str], max_revisit_per_city=1, max_extra_legs=3):
-    base = [home] + visits
-    prev = visits[:-1]
-    routes = set()
-    routes.add(tuple(base + [home]))
+def generate_physical_routes(home: str, visits: List[str], max_revisit_per_city=0, max_extra_legs=0):
+    """
+    Generate only the chronological physical travel route.
 
-    max_r = min(max_extra_legs, len(prev) * max_revisit_per_city)
-    for r in range(1, max_r + 1):
-        for seq in itertools.product(prev, repeat=r):
-            ok = True
-            counts = {}
-            last = visits[-1]
-            for city in seq:
-                counts[city] = counts.get(city, 0) + 1
-                if counts[city] > max_revisit_per_city or city == last:
-                    ok = False
-                    break
-                last = city
-            if ok:
-                routes.add(tuple(base + list(seq) + [home]))
+    A city that has already been visited is never inserted again merely to create
+    more ticketing combinations. Ticketing alternatives are generated separately
+    by partitioning this fixed route into one-way / round-trip / multi-city tickets.
 
-    return [list(r) for r in sorted(routes, key=lambda x: (len(x), x))]
+    Example:
+      ICN -> IST -> JTR -> ATH -> ICN
+    stays exactly that physical route.
+    """
+    if not visits:
+        return [[home, home]]
+    return [[home] + list(visits) + [home]]
+
+
+def build_route_and_legs_from_stays(home: str, home_departure: str, stays: list):
+    ordered = sorted(
+        stays,
+        key=lambda x: (
+            x.get("arrival_date", "9999-12-31"),
+            x.get("departure_date", "9999-12-31"),
+            x.get("city", ""),
+            int(x.get("visit_no", 1)),
+        ),
+    )
+    route = [home] + [s["city"] for s in ordered] + [home]
+    legs = []
+    if ordered:
+        legs.append(Leg(home, ordered[0]["city"], home_departure))
+        for i in range(len(ordered) - 1):
+            legs.append(Leg(
+                ordered[i]["city"],
+                ordered[i+1]["city"],
+                ordered[i]["departure_date"],
+            ))
+        legs.append(Leg(ordered[-1]["city"], home, ordered[-1]["departure_date"]))
+    return route, legs, ordered
+
+def generate_ticket_patterns_from_legs(route: List[str], legs: List[Leg]):
+    patterns = []
+    for groups in all_contiguous_partitions(len(legs)):
+        patterns.append(("contiguous", [list(range(s, e)) for s, e in groups]))
+
+    # Only create round-trip grouping if both outbound and return legs really exist
+    # in the user-entered physical itinerary.
+    for i in range(len(legs)):
+        for j in range(i + 1, len(legs)):
+            a, b = legs[i], legs[j]
+            if a.origin == b.destination and a.destination == b.origin:
+                patterns.append(("explicit_roundtrip", [[i, j]]))
+
+    seen, unique = set(), []
+    for kind, tickets in patterns:
+        key = tuple(sorted(tuple(sorted(t)) for t in tickets))
+        if key not in seen:
+            seen.add(key)
+            unique.append((kind, tickets))
+    return unique
 
 def all_contiguous_partitions(nlegs: int):
     if nlegs <= 0:
@@ -157,61 +195,19 @@ def symmetric_roundtrip_partition(route: List[str]):
 
 def build_legs_for_route(route: List[str], departure_dates_by_city: dict, final_required_city=None):
     """
-    Build dated physical legs.
-
-    Rule:
-    - During the required visit sequence, use each city's user-entered departure date.
-    - After the final required visit city has been reached, revisit/return legs use
-      the final visit city's departure date as the search anchor.
-
-    Example:
-      ICN 12/24 -> IST 12/28 -> ATH 01/02 -> IST -> ICN
-    becomes
-      ICN->IST 12/24
-      IST->ATH 12/28
-      ATH->IST 01/02
-      IST->ICN 01/02
-
-    Actual feasible connection time is checked later from the selected flight times.
+    Build dated legs from the fixed chronological route.
+    Each leg departs on the user-entered departure date of its origin city.
+    No previously visited city is reinserted.
     """
     legs = []
-    if final_required_city is None:
-        # Fall back to the latest scheduled departure date, NOT dict insertion order.
-        non_home_candidates = [
-            (city, dep) for city, dep in departure_dates_by_city.items()
-            if city in route[1:-1]
-        ]
-        final_required_city = max(
-            non_home_candidates,
-            key=lambda item: (item[1], item[0])
-        )[0] if non_home_candidates else route[-2]
-
-    final_departure_date = departure_dates_by_city.get(
-        final_required_city,
-        max(departure_dates_by_city.values())
-    )
-
-    final_required_index = None
-    for i, city in enumerate(route):
-        if city == final_required_city:
-            final_required_index = i
-            break
-
-    for i, (a, b) in enumerate(zip(route[:-1], route[1:])):
-        if final_required_index is not None and i >= final_required_index:
-            dep = final_departure_date
-        else:
-            dep = departure_dates_by_city.get(a, final_departure_date)
+    fallback = max(departure_dates_by_city.values()) if departure_dates_by_city else date.today().isoformat()
+    for a, b in zip(route[:-1], route[1:]):
+        dep = departure_dates_by_city.get(a, fallback)
         legs.append(Leg(a, b, dep))
     return legs
 
 def generate_ticket_patterns(route: List[str], departure_dates_by_city: dict):
-    final_required_city = max(
-        [c for c in route[1:-1] if c in departure_dates_by_city],
-        key=lambda c: (departure_dates_by_city.get(c, ""), c),
-        default=route[-2],
-    )
-    legs = build_legs_for_route(route, departure_dates_by_city, final_required_city=final_required_city)
+    legs = build_legs_for_route(route, departure_dates_by_city)
     patterns = []
 
     for groups in all_contiguous_partitions(len(legs)):
@@ -231,95 +227,100 @@ def generate_ticket_patterns(route: List[str], departure_dates_by_city: dict):
     return legs, unique
 
 def rebuild_generated_from_saved_state(generated):
-    """
-    Rebuild physical routes/ticket patterns from the saved schedule instead of
-    trusting stale pattern objects saved by an older UI/session.
-
-    This fixes cases where the visible saved dates are correct but the old
-    generated checklist still contains previous/default dates.
-    """
     if not generated:
         return generated
 
     home = generated.get("home")
-    visits = list(generated.get("visits") or [])
-    departure_dates = dict(generated.get("dates") or {})
-    arrival_dates = dict(generated.get("arrival_dates") or {})
-
-    if not home or not visits or not departure_dates:
+    dep_map = generated.get("dates") or {}
+    arr_map = generated.get("arrival_dates") or {}
+    exact_map = generated.get("exact_arrival_required") or {}
+    home_departure = dep_map.get(home)
+    if not home or not home_departure:
         return generated
 
-    # Re-sort from saved arrival/departure dates.
-    visits = sorted(
-        visits,
-        key=lambda city: (
-            arrival_dates.get(city, "9999-12-31"),
-            departure_dates.get(city, "9999-12-31"),
-            city,
-        )
-    )
-
-    max_revisit = int(generated.get("max_revisit", 1) or 1)
-    max_extra = int(generated.get("max_extra", max(1, len(visits) - 1)) or max(1, len(visits) - 1))
-
-    routes = generate_physical_routes(home, visits, max_revisit, max_extra)
-    rebuilt_patterns = []
-    for ridx, route in enumerate(routes, 1):
-        legs, patterns = generate_ticket_patterns(route, departure_dates)
-        for pidx, (kind, tickets) in enumerate(patterns, 1):
-            rebuilt_patterns.append({
-                "route": route,
-                "legs": legs,
-                "kind": kind,
-                "tickets": tickets,
-                "pattern_id": f"R{ridx}-P{pidx}",
+    stays = generated.get("itinerary_stays")
+    if not stays:
+        stays = []
+        seen = {}
+        for city in generated.get("visits") or []:
+            seen[city] = seen.get(city, 0) + 1
+            stays.append({
+                "city": city,
+                "visit_no": seen[city],
+                "arrival_date": arr_map.get(city),
+                "departure_date": dep_map.get(city),
+                "exact_arrival": bool(exact_map.get(city, False)),
             })
 
+    route, legs, ordered = build_route_and_legs_from_stays(home, home_departure, stays)
+    defs = generate_ticket_patterns_from_legs(route, legs)
+    patterns = [{
+        "route": route,
+        "legs": legs,
+        "kind": kind,
+        "tickets": tickets,
+        "pattern_id": f"R1-P{i+1}",
+    } for i, (kind, tickets) in enumerate(defs)]
+
     rebuilt = dict(generated)
-    rebuilt["visits"] = visits
-    rebuilt["patterns"] = rebuilt_patterns
+    rebuilt["itinerary_stays"] = ordered
+    rebuilt["visits"] = [s["city"] for s in ordered]
+    rebuilt["patterns"] = patterns
     return rebuilt
 
 def sync_widgets_from_generated(generated):
-    """
-    Push loaded trip values into Streamlit widget state BEFORE the widgets are
-    rendered in this rerun.
-    """
     if not generated:
         return
 
     home = generated.get("home") or "ICN"
-    visits = list(generated.get("visits") or [])
     dep = generated.get("dates") or {}
     arr = generated.get("arrival_dates") or {}
     exact = generated.get("exact_arrival_required") or {}
+    stays = generated.get("itinerary_stays") or []
+
+    if not stays:
+        counts = {}
+        for city in generated.get("visits") or []:
+            counts[city] = counts.get(city, 0) + 1
+            stays.append({
+                "city": city,
+                "visit_no": counts[city],
+                "arrival_date": arr.get(city),
+                "departure_date": dep.get(city),
+                "exact_arrival": bool(exact.get(city, False)),
+            })
+
+    unique_cities = []
+    for s in stays:
+        if s["city"] not in unique_cities:
+            unique_cities.append(s["city"])
 
     st.session_state["home_input"] = home
-    st.session_state["visit_input"] = ",".join(visits)
+    st.session_state["visit_input"] = ",".join(unique_cities)
     st.session_state["flex_input"] = int(generated.get("flex", 1) or 0)
     st.session_state["topn_input"] = int(generated.get("topn", 10) or 10)
-    st.session_state["max_revisit_input"] = int(generated.get("max_revisit", 1) or 1)
-    st.session_state["max_extra_input"] = int(generated.get("max_extra", max(1, len(visits)-1)) or max(1, len(visits)-1))
 
-    def to_date(value, fallback):
-        if not value:
-            return fallback
+    def to_date(v, fallback):
         try:
-            return datetime.strptime(str(value), "%Y-%m-%d").date()
+            return datetime.strptime(str(v), "%Y-%m-%d").date()
         except Exception:
             return fallback
 
     st.session_state["home_departure_date"] = to_date(dep.get(home), date.today())
     st.session_state["home_final_arrival_date"] = to_date(
-        generated.get("home_final_arrival") or arr.get(home),
-        date.today()
+        generated.get("home_final_arrival") or arr.get(home), date.today()
     )
     st.session_state["exact_home_arrival"] = bool(exact.get(home, False))
 
-    for i, city in enumerate(visits):
-        st.session_state[f"arr_{city}_{i}"] = to_date(arr.get(city), date.today())
-        st.session_state[f"dep_{city}_{i}"] = to_date(dep.get(city), date.today())
-        st.session_state[f"exact_arrival_{city}_{i}"] = bool(exact.get(city, False))
+    counts = {}
+    for s in stays:
+        city = s["city"]
+        counts[city] = counts.get(city, 0) + 1
+        n = counts[city]
+        st.session_state[f"repeat_count_{city}"] = counts[city]
+        st.session_state[f"arr_{city}_{n}"] = to_date(s.get("arrival_date"), date.today())
+        st.session_state[f"dep_{city}_{n}"] = to_date(s.get("departure_date"), date.today())
+        st.session_state[f"exact_arrival_{city}_{n}"] = bool(s.get("exact_arrival", False))
 
 def format_ticket(legs: List[Leg], idxs: List[int]):
     return " / ".join(f"{airport_label(legs[i].origin)} → {airport_label(legs[i].destination)} ({legs[i].departure_date})" for i in idxs)
@@ -974,7 +975,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.15 · 검색결과 입력 UI 간소화")
+st.caption("Version 3.17 · 사용자 지정 재방문 일정 지원")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1138,32 +1139,29 @@ with tab1:
     departure_dates_by_city = {}
     arrival_dates_by_city = {}
     exact_arrival_required = {}
+    itinerary_stays = []
 
     st.markdown("### 🗓️ 도시별 도착 / 출발 일정")
     st.caption(
-        "각 방문 도시의 도착일과 출발일을 입력하세요. "
-        "항공권 검색 날짜는 출발일을 기준으로 생성하고, 도착일은 체류 일정 확인에 사용합니다."
+        "같은 도시를 실제로 다시 방문할 때만 `＋ 날짜 추가`를 누르세요. "
+        "프로그램이 임의로 재방문 경로를 만들지는 않습니다."
     )
 
     default_home_depart = date(2026, 12, 23)
     default_visit_arrivals = [
-        date(2026, 12, 24),
-        date(2026, 12, 29),
-        date(2027, 1, 3),
-        date(2027, 1, 6),
+        date(2026, 12, 24), date(2026, 12, 29),
+        date(2027, 1, 3), date(2027, 1, 6),
     ]
     default_visit_departures = [
-        date(2026, 12, 28),
-        date(2027, 1, 2),
-        date(2027, 1, 5),
-        date(2027, 1, 8),
+        date(2026, 12, 28), date(2027, 1, 2),
+        date(2027, 1, 5), date(2027, 1, 8),
     ]
 
     c_home1, c_home2, c_home3 = st.columns([2, 2, 1])
     with c_home1:
         home_depart = st.date_input(
             f"{airport_label(home)} 출발",
-            default_home_depart,
+            st.session_state.get("home_departure_date", default_home_depart),
             key="home_departure_date"
         )
         departure_dates_by_city[home] = home_depart.isoformat()
@@ -1172,90 +1170,121 @@ with tab1:
         default_visit_departures[min(max(len(visits)-1, 0), len(default_visit_departures)-1)] + timedelta(days=1)
         if visits else default_home_depart + timedelta(days=1)
     )
-
     with c_home2:
         home_arrive = st.date_input(
             f"{airport_label(home)} 최종 도착",
-            default_final_home_arrival,
+            st.session_state.get("home_final_arrival_date", default_final_home_arrival),
             key="home_final_arrival_date"
         )
         arrival_dates_by_city[home] = home_arrive.isoformat()
-
     with c_home3:
         st.markdown("##### 도착 조건")
         exact_arrival_required[home] = st.checkbox(
             "정확 도착",
-            value=True,
-            key="exact_home_arrival",
-            help="체크 시 선택한 최종 도착일에 정확히 도착하는 항공편만 결과에 포함합니다."
+            value=bool(st.session_state.get("exact_home_arrival", True)),
+            key="exact_home_arrival"
         )
 
-    if visits:
-        for i, node in enumerate(visits):
-            c_arr, c_exact, c_dep = st.columns([2, 1, 2])
-            with c_arr:
-                arr_default = default_visit_arrivals[min(i, len(default_visit_arrivals)-1)]
+    for i, node in enumerate(visits):
+        if f"repeat_count_{node}" not in st.session_state:
+            st.session_state[f"repeat_count_{node}"] = 1
+
+        h1, h2 = st.columns([4, 1])
+        with h1:
+            st.markdown(f"#### {airport_label(node)} 일정")
+        with h2:
+            if st.button("＋ 날짜 추가", key=f"add_repeat_{node}", use_container_width=True):
+                st.session_state[f"repeat_count_{node}"] += 1
+                st.rerun()
+
+        repeat_count = int(st.session_state[f"repeat_count_{node}"])
+        for n in range(1, repeat_count + 1):
+            arr_key, dep_key = f"arr_{node}_{n}", f"dep_{node}_{n}"
+            exact_key = f"exact_arrival_{node}_{n}"
+            c1, c2, c3, c4 = st.columns([2, 1, 2, 0.7])
+
+            base_idx = min(i, len(default_visit_arrivals)-1)
+            arr_default = default_visit_arrivals[base_idx] + timedelta(days=(n-1)*3)
+            dep_default = default_visit_departures[base_idx] + timedelta(days=(n-1)*3)
+
+            with c1:
                 arr = st.date_input(
-                    f"{airport_label(node)} 도착",
-                    arr_default,
-                    key=f"arr_{node}_{i}"
+                    f"{airport_label(node)} 도착" + (f" #{n}" if repeat_count > 1 else ""),
+                    st.session_state.get(arr_key, arr_default),
+                    key=arr_key
                 )
-                arrival_dates_by_city[node] = arr.isoformat()
-
-            with c_exact:
+            with c2:
                 st.markdown("##### 도착 조건")
-                exact_arrival_required[node] = st.checkbox(
+                exact_val = st.checkbox(
                     "정확 도착",
-                    value=True,
-                    key=f"exact_arrival_{node}_{i}",
-                    help="체크 시 이 날짜에 정확히 도착하는 항공편만 결과에 포함합니다."
+                    value=bool(st.session_state.get(exact_key, True)),
+                    key=exact_key
                 )
-
-            with c_dep:
-                dep_default = default_visit_departures[min(i, len(default_visit_departures)-1)]
+            with c3:
                 dep = st.date_input(
-                    f"{airport_label(node)} 출발",
-                    dep_default,
-                    key=f"dep_{node}_{i}"
+                    f"{airport_label(node)} 출발" + (f" #{n}" if repeat_count > 1 else ""),
+                    st.session_state.get(dep_key, dep_default),
+                    key=dep_key
                 )
-                departure_dates_by_city[node] = dep.isoformat()
+            with c4:
+                st.markdown("##### ")
+                if n > 1 and st.button("삭제", key=f"remove_repeat_{node}_{n}"):
+                    st.session_state[f"repeat_count_{node}"] -= 1
+                    st.session_state.pop(arr_key, None)
+                    st.session_state.pop(dep_key, None)
+                    st.session_state.pop(exact_key, None)
+                    st.rerun()
 
             if dep < arr:
-                st.error(f"{airport_label(node)} 출발일은 도착일보다 빠를 수 없습니다.")
+                st.error(f"{airport_label(node)} 방문 #{n}: 출발일은 도착일보다 빠를 수 없습니다.")
 
-    # User does not need to enter visit order separately.
-    # Sort automatically by arrival date, then departure date, then code.
-    sorted_visits = sorted(
-        visits,
-        key=lambda city: (
-            arrival_dates_by_city.get(city, "9999-12-31"),
-            departure_dates_by_city.get(city, "9999-12-31"),
-            city,
-        )
+            itinerary_stays.append({
+                "city": node,
+                "visit_no": n,
+                "arrival_date": arr.isoformat(),
+                "departure_date": dep.isoformat(),
+                "exact_arrival": bool(exact_val),
+            })
+
+            if n == 1:
+                arrival_dates_by_city[node] = arr.isoformat()
+                departure_dates_by_city[node] = dep.isoformat()
+                exact_arrival_required[node] = bool(exact_val)
+
+    ordered_stays = sorted(
+        itinerary_stays,
+        key=lambda s: (s["arrival_date"], s["departure_date"], s["city"], s["visit_no"])
     )
+    sorted_visits = [s["city"] for s in ordered_stays]
 
-    if sorted_visits:
+    if ordered_stays:
         st.info(
             "자동 여행 순서: "
-            + " → ".join([airport_label(home)] + [airport_label(c) for c in sorted_visits] + [airport_label(home)])
+            + " → ".join([airport_label(home)] + [airport_label(s["city"]) for s in ordered_stays] + [airport_label(home)])
         )
 
-        # Chronology validation between consecutive stays.
-        for prev_city, next_city in zip(sorted_visits[:-1], sorted_visits[1:]):
-            prev_dep = departure_dates_by_city.get(prev_city)
-            next_arr = arrival_dates_by_city.get(next_city)
-            if prev_dep and next_arr and prev_dep > next_arr:
-                st.error(
-                    f"일정 충돌: {airport_label(prev_city)} 출발일({prev_dep})이 "
-                    f"{airport_label(next_city)} 도착일({next_arr})보다 늦습니다."
-                )
+    with st.expander("📅 입력한 전체 여행 일정 보기", expanded=True):
+        schedule_rows = [{
+            "도시": airport_label(home), "방문": "출국", "도착": "-",
+            "출발": departure_dates_by_city.get(home, ""), "정확 도착": "-"
+        }]
+        for s in ordered_stays:
+            schedule_rows.append({
+                "도시": airport_label(s["city"]),
+                "방문": f'#{s["visit_no"]}',
+                "도착": s["arrival_date"],
+                "출발": s["departure_date"],
+                "정확 도착": "✓" if s["exact_arrival"] else "-"
+            })
+        schedule_rows.append({
+            "도시": airport_label(home), "방문": "귀국",
+            "도착": arrival_dates_by_city.get(home, ""), "출발": "-",
+            "정확 도착": "✓" if exact_arrival_required.get(home, False) else "-"
+        })
+        st.dataframe(pd.DataFrame(schedule_rows), use_container_width=True, hide_index=True)
 
-    c4, c5, c6 = st.columns(3)
+    c4, c5 = st.columns(2)
     with c4:
-        max_revisit = st.number_input("도시별 최대 재방문", 0, 2, int(st.session_state.get("max_revisit_input", 1)), key="max_revisit_input")
-    with c5:
-        max_extra = st.number_input("추가 이동 최대 leg", 0, 6, int(st.session_state.get("max_extra_input", max(1, len(visits)-1))), key="max_extra_input")
-    with c6:
         topn_options = [5,10,20,50]
         current_topn = int(st.session_state.get("topn_input", 10))
         topn = st.selectbox(
@@ -1264,49 +1293,32 @@ with tab1:
             index=topn_options.index(current_topn) if current_topn in topn_options else 1,
             key="topn_input"
         )
+    with c5:
+        st.caption("재방문은 사용자가 `＋ 날짜 추가`로 입력한 경우에만 경로에 포함됩니다.")
 
-    if visits:
-        schedule_rows = [{
-            "도시": airport_label(home),
-            "도착": "-",
-            "출발": departure_dates_by_city.get(home, ""),
-            "정확 도착": "-"
-        }]
-        for city in sorted_visits:
-            schedule_rows.append({
-                "도시": airport_label(city),
-                "도착": arrival_dates_by_city.get(city, ""),
-                "출발": departure_dates_by_city.get(city, ""),
-                "정확 도착": "✓" if exact_arrival_required.get(city, False) else "-"
-            })
-        schedule_rows.append({
-            "도시": airport_label(home),
-            "도착": arrival_dates_by_city.get(home, ""),
-            "출발": "-",
-            "정확 도착": "✓" if exact_arrival_required.get(home, False) else "-"
-        })
-        with st.expander("📅 입력한 전체 여행 일정 보기", expanded=True):
-            st.dataframe(pd.DataFrame(schedule_rows), use_container_width=True, hide_index=True)
+    max_revisit = 0
+    max_extra = 0
 
     if st.button("경로·발권 후보 생성", type="primary"):
-        routes = generate_physical_routes(home, sorted_visits, int(max_revisit), int(max_extra))
-        generated = []
-        for ridx, route in enumerate(routes, 1):
-            legs, patterns = generate_ticket_patterns(route, departure_dates_by_city)
-            for pidx, (kind, tickets) in enumerate(patterns, 1):
-                generated.append({
-                    "route": route,
-                    "legs": legs,
-                    "kind": kind,
-                    "tickets": tickets,
-                    "pattern_id": f"R{ridx}-P{pidx}"
-                })
+        route, legs, ordered_stays = build_route_and_legs_from_stays(
+            home, departure_dates_by_city[home], itinerary_stays
+        )
+        defs = generate_ticket_patterns_from_legs(route, legs)
+        generated = [{
+            "route": route,
+            "legs": legs,
+            "kind": kind,
+            "tickets": tickets,
+            "pattern_id": f"R1-P{i+1}"
+        } for i, (kind, tickets) in enumerate(defs)]
+        routes = [route]
         st.session_state.generated = {
             "home": home,
             "visits": sorted_visits,
             "dates": departure_dates_by_city,
             "arrival_dates": arrival_dates_by_city,
             "exact_arrival_required": exact_arrival_required,
+            "itinerary_stays": ordered_stays,
             "home_final_arrival": arrival_dates_by_city.get(home),
             "flex": flex,
             "topn": topn,
@@ -1356,6 +1368,8 @@ with tab2:
     if not st.session_state.generated:
         st.warning("먼저 1번 탭에서 경로를 생성하세요.")
     else:
+        # Defensive rebuild: old saved trips may contain stale revisit patterns.
+        st.session_state.generated = rebuild_generated_from_saved_state(st.session_state.generated)
         patterns = st.session_state.generated["patterns"]
         search_tasks = collect_unique_search_tasks(patterns)
 
@@ -1636,32 +1650,38 @@ def _actual_ticket_final_arrival_date(legs, ticket_idxs, offer):
         return None
 
 def combo_matches_exact_arrival_dates(pattern, combo, generated_state):
-    """
-    Enforce exact arrival date at every ticket boundary that ends at a planned city/home.
-    Returns (is_valid, reasons).
-
-    For a multi-city ticket stored as one combined offer, only that ticket's final
-    destination can be verified from the current single arrival/+N field.
-    """
     reasons = []
+    stays = generated_state.get("itinerary_stays") or []
+    home = generated_state.get("home")
+    home_exact = (generated_state.get("exact_arrival_required") or {}).get(home, False)
+
+    expected_by_leg = {}
+    for i, stay in enumerate(stays):
+        if stay.get("exact_arrival"):
+            expected_by_leg[i] = stay.get("arrival_date")
+
+    if home_exact and pattern.get("legs"):
+        expected_by_leg[len(pattern["legs"]) - 1] = (
+            generated_state.get("home_final_arrival")
+            or (generated_state.get("arrival_dates") or {}).get(home)
+        )
+
     for ticket_idxs, offer in zip(pattern["tickets"], combo):
         if not ticket_idxs:
             continue
-        final_leg = pattern["legs"][ticket_idxs[-1]]
-        dest = final_leg.destination
-        expected = _expected_arrival_date_for_city(generated_state, dest)
+        final_idx = ticket_idxs[-1]
+        expected = expected_by_leg.get(final_idx)
         if not expected:
             continue
         actual = _actual_ticket_final_arrival_date(pattern["legs"], ticket_idxs, offer)
         if not actual:
-            reasons.append(f"{airport_label(dest)} 실제 도착일 확인 불가")
-            return False, reasons
+            return False, ["실제 도착일 확인 불가"]
         if actual != expected:
-            reasons.append(
-                f"{airport_label(dest)} 도착일 불일치: 실제 {actual} / 계획 {expected}"
-            )
-            return False, reasons
+            dest = pattern["legs"][final_idx].destination
+            return False, [f"{airport_label(dest)} 도착일 불일치: 실제 {actual} / 계획 {expected}"]
+
     return True, reasons
+
 
 with tab3:
     st.subheader("전체 발권 조합 및 가격 Ranking")

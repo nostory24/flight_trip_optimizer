@@ -1,12 +1,10 @@
-# Flight Trip Optimizer v3.15
+# Flight Trip Optimizer v3.17
 
-변경사항
-- `현재 검색 결과 페이지 URL` 입력란 제거
-- `검색 화면 캡처` 업로드란 제거
-- 검색결과 입력 안내를 접을 수 있는 `ⓘ 붙여넣을 정보 보기`로 변경
-- 검색결과 텍스트 입력창은 그대로 유지
-- 안내에는 필수 정보/선택 정보/붙여넣기 예시 표시
-- v3.14의 저장 여행 복원 및 날짜/경로 수정사항 유지
+- 도시별 `＋ 날짜 추가` 지원
+- 동일 도시 재방문은 사용자가 명시적으로 추가한 경우에만 허용
+- 예: ATH → JTR → ATH → ICN 가능
+- 반복 방문 날짜/정확도착 조건 Cloud DB 저장 및 복원
+- 체크리스트는 실제 입력된 physical itinerary만 기반으로 생성
+- 프로그램 임의 재방문은 계속 금지
 
-배포: GitHub의 app.py 교체 → Commit/Push → Render 자동배포.
-DATABASE_URL 변경 불필요.
+GitHub app.py 교체 → Commit/Push → Render 자동배포.
