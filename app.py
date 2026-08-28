@@ -10,7 +10,7 @@ import shutil
 from pathlib import Path
 from sqlalchemy import create_engine, text as sql_text
 from datetime import date, datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, is_dataclass
 from typing import List
 
 st.set_page_config(page_title="Flight Trip Optimizer", layout="wide")
@@ -489,11 +489,23 @@ def _jsonable(value):
         }
     if isinstance(value, (date, datetime)):
         return {"__type__": "datetime", "value": value.isoformat()}
+    if is_dataclass(value):
+        data = asdict(value)
+        data["__type__"] = value.__class__.__name__
+        return {str(k): _jsonable(v) for k, v in data.items()}
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set)):
         return [_jsonable(v) for v in value]
-    return value
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    # Last-resort safe representation so export/download can never crash
+    # on a non-JSON-native object.
+    return str(value)
+
+def _json_default(value):
+    """Fallback serializer for json.dumps(default=...)."""
+    return _jsonable(value)
 
 def _restore_objects(value):
     """Restore objects that must remain structured after DB reload."""
@@ -540,7 +552,7 @@ def init_db():
         """))
 
 def save_state(key, value):
-    payload = json.dumps(_jsonable(value), ensure_ascii=False)
+    payload = json.dumps(_jsonable(value), ensure_ascii=False, default=_json_default)
     now = datetime.now().isoformat(timespec="seconds")
     with engine.begin() as conn:
         # Avoid dialect-specific UPSERT syntax.
@@ -579,7 +591,7 @@ def save_all_offers(offers):
                 """),
                 {
                     "search_key": offer.get("search_key", ""),
-                    "payload": json.dumps(_jsonable(offer), ensure_ascii=False),
+                    "payload": json.dumps(_jsonable(offer), ensure_ascii=False, default=_json_default),
                     "created_at": now,
                     "updated_at": now,
                 },
@@ -610,10 +622,16 @@ def export_snapshot_json():
     snapshot = {
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "db_mode": DB_MODE,
-        "generated": _jsonable(st.session_state.get("generated")),
-        "offers": _jsonable(st.session_state.get("offers", [])),
+        "generated": st.session_state.get("generated"),
+        "offers": st.session_state.get("offers", []),
     }
-    return json.dumps(snapshot, ensure_ascii=False, indent=2).encode("utf-8")
+    safe_snapshot = _jsonable(snapshot)
+    return json.dumps(
+        safe_snapshot,
+        ensure_ascii=False,
+        indent=2,
+        default=_json_default,
+    ).encode("utf-8")
 
 def daily_backup():
     # Local SQLite only. Cloud PostgreSQL is persistent independently of Render's filesystem.
@@ -672,7 +690,7 @@ def save_named_trip(trip_name, trip_id=None):
     if not trip_name:
         raise ValueError("여행 이름을 입력하세요.")
 
-    snapshot = json.dumps(current_trip_snapshot(), ensure_ascii=False)
+    snapshot = json.dumps(_jsonable(current_trip_snapshot()), ensure_ascii=False, default=_json_default)
     now = datetime.now().isoformat(timespec="seconds")
     if not trip_id:
         trip_id = _make_trip_id()
@@ -841,6 +859,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
+st.caption("Version 3.10.3 · Cloud DB + Named Trips + JSON serialization hotfix")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
