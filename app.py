@@ -848,18 +848,19 @@ except Exception as exc:
 # -----------------------------
 # Session
 # -----------------------------
+# A fresh browser session must start with an empty workspace.
+# Saved trips are restored ONLY when the user explicitly selects "불러오기".
 if "offers" not in st.session_state:
-    st.session_state.offers = [] if DB_INIT_ERROR else load_all_offers()
+    st.session_state.offers = []
 if "generated" not in st.session_state:
-    st.session_state.generated = None if DB_INIT_ERROR else load_state("generated", None)
-
+    st.session_state.generated = None
 if "active_trip_id" not in st.session_state:
     st.session_state.active_trip_id = None
 if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.12 · 도시별 정확 도착 체크박스")
+st.caption("Version 3.13 · 새 접속 빈 화면 + 저장 여행 수동 불러오기")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -869,7 +870,8 @@ with st.sidebar:
     if active_name:
         st.success(f"현재 여행: {active_name}")
     else:
-        st.info("현재 여행: 이름 없음")
+        st.info("현재 여행: 새 작업")
+        st.caption("저장된 여행은 아래 목록에서 직접 불러오세요.")
 
     new_trip_name = st.text_input(
         "현재 작업을 여행으로 저장",
