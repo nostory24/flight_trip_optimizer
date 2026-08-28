@@ -155,7 +155,7 @@ def symmetric_roundtrip_partition(route: List[str]):
         groups.append([(n - 1) // 2])
     return groups
 
-def build_legs_for_route(route: List[str], departure_dates_by_city: dict):
+def build_legs_for_route(route: List[str], departure_dates_by_city: dict, final_required_city=None):
     """
     Build dated physical legs.
 
@@ -175,9 +175,21 @@ def build_legs_for_route(route: List[str], departure_dates_by_city: dict):
     Actual feasible connection time is checked later from the selected flight times.
     """
     legs = []
-    nodes_with_dates = list(departure_dates_by_city.keys())
-    final_required_city = nodes_with_dates[-1]
-    final_departure_date = departure_dates_by_city[final_required_city]
+    if final_required_city is None:
+        # Fall back to the latest scheduled departure date, NOT dict insertion order.
+        non_home_candidates = [
+            (city, dep) for city, dep in departure_dates_by_city.items()
+            if city in route[1:-1]
+        ]
+        final_required_city = max(
+            non_home_candidates,
+            key=lambda item: (item[1], item[0])
+        )[0] if non_home_candidates else route[-2]
+
+    final_departure_date = departure_dates_by_city.get(
+        final_required_city,
+        max(departure_dates_by_city.values())
+    )
 
     final_required_index = None
     for i, city in enumerate(route):
@@ -194,7 +206,12 @@ def build_legs_for_route(route: List[str], departure_dates_by_city: dict):
     return legs
 
 def generate_ticket_patterns(route: List[str], departure_dates_by_city: dict):
-    legs = build_legs_for_route(route, departure_dates_by_city)
+    final_required_city = max(
+        [c for c in route[1:-1] if c in departure_dates_by_city],
+        key=lambda c: (departure_dates_by_city.get(c, ""), c),
+        default=route[-2],
+    )
+    legs = build_legs_for_route(route, departure_dates_by_city, final_required_city=final_required_city)
     patterns = []
 
     for groups in all_contiguous_partitions(len(legs)):
@@ -212,6 +229,97 @@ def generate_ticket_patterns(route: List[str], departure_dates_by_city: dict):
             seen.add(key)
             unique.append((kind, tickets))
     return legs, unique
+
+def rebuild_generated_from_saved_state(generated):
+    """
+    Rebuild physical routes/ticket patterns from the saved schedule instead of
+    trusting stale pattern objects saved by an older UI/session.
+
+    This fixes cases where the visible saved dates are correct but the old
+    generated checklist still contains previous/default dates.
+    """
+    if not generated:
+        return generated
+
+    home = generated.get("home")
+    visits = list(generated.get("visits") or [])
+    departure_dates = dict(generated.get("dates") or {})
+    arrival_dates = dict(generated.get("arrival_dates") or {})
+
+    if not home or not visits or not departure_dates:
+        return generated
+
+    # Re-sort from saved arrival/departure dates.
+    visits = sorted(
+        visits,
+        key=lambda city: (
+            arrival_dates.get(city, "9999-12-31"),
+            departure_dates.get(city, "9999-12-31"),
+            city,
+        )
+    )
+
+    max_revisit = int(generated.get("max_revisit", 1) or 1)
+    max_extra = int(generated.get("max_extra", max(1, len(visits) - 1)) or max(1, len(visits) - 1))
+
+    routes = generate_physical_routes(home, visits, max_revisit, max_extra)
+    rebuilt_patterns = []
+    for ridx, route in enumerate(routes, 1):
+        legs, patterns = generate_ticket_patterns(route, departure_dates)
+        for pidx, (kind, tickets) in enumerate(patterns, 1):
+            rebuilt_patterns.append({
+                "route": route,
+                "legs": legs,
+                "kind": kind,
+                "tickets": tickets,
+                "pattern_id": f"R{ridx}-P{pidx}",
+            })
+
+    rebuilt = dict(generated)
+    rebuilt["visits"] = visits
+    rebuilt["patterns"] = rebuilt_patterns
+    return rebuilt
+
+def sync_widgets_from_generated(generated):
+    """
+    Push loaded trip values into Streamlit widget state BEFORE the widgets are
+    rendered in this rerun.
+    """
+    if not generated:
+        return
+
+    home = generated.get("home") or "ICN"
+    visits = list(generated.get("visits") or [])
+    dep = generated.get("dates") or {}
+    arr = generated.get("arrival_dates") or {}
+    exact = generated.get("exact_arrival_required") or {}
+
+    st.session_state["home_input"] = home
+    st.session_state["visit_input"] = ",".join(visits)
+    st.session_state["flex_input"] = int(generated.get("flex", 1) or 0)
+    st.session_state["topn_input"] = int(generated.get("topn", 10) or 10)
+    st.session_state["max_revisit_input"] = int(generated.get("max_revisit", 1) or 1)
+    st.session_state["max_extra_input"] = int(generated.get("max_extra", max(1, len(visits)-1)) or max(1, len(visits)-1))
+
+    def to_date(value, fallback):
+        if not value:
+            return fallback
+        try:
+            return datetime.strptime(str(value), "%Y-%m-%d").date()
+        except Exception:
+            return fallback
+
+    st.session_state["home_departure_date"] = to_date(dep.get(home), date.today())
+    st.session_state["home_final_arrival_date"] = to_date(
+        generated.get("home_final_arrival") or arr.get(home),
+        date.today()
+    )
+    st.session_state["exact_home_arrival"] = bool(exact.get(home, False))
+
+    for i, city in enumerate(visits):
+        st.session_state[f"arr_{city}_{i}"] = to_date(arr.get(city), date.today())
+        st.session_state[f"dep_{city}_{i}"] = to_date(dep.get(city), date.today())
+        st.session_state[f"exact_arrival_{city}_{i}"] = bool(exact.get(city, False))
 
 def format_ticket(legs: List[Leg], idxs: List[int]):
     return " / ".join(f"{airport_label(legs[i].origin)} → {airport_label(legs[i].destination)} ({legs[i].departure_date})" for i in idxs)
@@ -778,10 +886,16 @@ def load_named_trip(trip_id):
     generated = _restore_objects(data.get("generated"))
     offers = _restore_objects(data.get("offers", []))
 
+    # Rebuild stale route/ticket objects from the saved schedule.
+    generated = rebuild_generated_from_saved_state(generated)
+
     st.session_state.generated = generated
     st.session_state.offers = offers
     st.session_state.active_trip_id = trip_id
     st.session_state.active_trip_name = row["trip_name"]
+
+    # Synchronize visible form widgets with the loaded trip.
+    sync_widgets_from_generated(generated)
 
     # Keep current autosave state in sync too.
     save_state("generated", generated)
@@ -860,7 +974,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.13 · 새 접속 빈 화면 + 저장 여행 수동 불러오기")
+st.caption("Version 3.15 · 검색결과 입력 UI 간소화")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1000,13 +1114,20 @@ with tab1:
     st.subheader("여행 조건")
     c1, c2, c3 = st.columns(3)
     with c1:
-        home = norm_code(st.text_input("출발지 IATA", "ICN"))
+        home = norm_code(st.text_input("출발지 IATA", st.session_state.get("home_input", "ICN"), key="home_input"))
     with c2:
-        visit_text = st.text_input("방문 도시 IATA (쉼표)", "IST,ATH", help="입력 순서는 상관없습니다. 아래 도착일 기준으로 자동 정렬합니다.")
+        visit_text = st.text_input("방문 도시 IATA (쉼표)", st.session_state.get("visit_input", "IST,ATH"), key="visit_input", help="입력 순서는 상관없습니다. 아래 도착일 기준으로 자동 정렬합니다.")
         visits = [norm_code(x) for x in visit_text.split(",") if norm_code(x)]
     with c3:
-        flex = st.selectbox("날짜 유연성", [0,1,2,3], index=1,
-                            format_func=lambda x: "정확한 날짜" if x == 0 else f"±{x}일")
+        flex_options = [0,1,2,3]
+        current_flex = int(st.session_state.get("flex_input", 1))
+        flex = st.selectbox(
+            "날짜 유연성",
+            flex_options,
+            index=flex_options.index(current_flex) if current_flex in flex_options else 1,
+            format_func=lambda x: "정확한 날짜" if x == 0 else f"±{x}일",
+            key="flex_input"
+        )
 
     st.caption("공항 코드는 아래처럼 공항/도시명을 함께 표시합니다. 예: ICN (인천/서울), IST (이스탄불), ATH (아테네), JTR (산토리니)")
     with st.expander("✈️ 주요 공항 코드 보기", expanded=False):
@@ -1131,11 +1252,18 @@ with tab1:
 
     c4, c5, c6 = st.columns(3)
     with c4:
-        max_revisit = st.number_input("도시별 최대 재방문", 0, 2, 1)
+        max_revisit = st.number_input("도시별 최대 재방문", 0, 2, int(st.session_state.get("max_revisit_input", 1)), key="max_revisit_input")
     with c5:
-        max_extra = st.number_input("추가 이동 최대 leg", 0, 6, max(1, len(visits)-1))
+        max_extra = st.number_input("추가 이동 최대 leg", 0, 6, int(st.session_state.get("max_extra_input", max(1, len(visits)-1))), key="max_extra_input")
     with c6:
-        topn = st.selectbox("최종 표시 Top N", [5,10,20,50], index=1)
+        topn_options = [5,10,20,50]
+        current_topn = int(st.session_state.get("topn_input", 10))
+        topn = st.selectbox(
+            "최종 표시 Top N",
+            topn_options,
+            index=topn_options.index(current_topn) if current_topn in topn_options else 1,
+            key="topn_input"
+        )
 
     if visits:
         schedule_rows = [{
@@ -1182,6 +1310,8 @@ with tab1:
             "home_final_arrival": arrival_dates_by_city.get(home),
             "flex": flex,
             "topn": topn,
+            "max_revisit": int(max_revisit),
+            "max_extra": int(max_extra),
             "patterns": generated
         }
         autosave()
@@ -1341,26 +1471,29 @@ with tab2:
                 use_container_width=True
             )
 
-        st.markdown("### 📌 이 검색 결과에서 입력할 정보")
+        # Keep the input area compact. Detailed guidance is available on demand.
+        source_url = ""
 
-        with st.expander("📋 검색 후 어떤 정보를 가져오면 되나요?", expanded=True):
+        with st.expander("ⓘ 붙여넣을 정보 보기", expanded=False):
             st.markdown("""
-**필수 정보**
-- **항공사**
-- **출발시간**
-- **도착시간**
-- **도착일 표시**: 같은 날 / `+1` / `+2`
-- **총 소요시간**
-- **가격**
-- **직항 또는 경유**
-- 경유라면 **경유 공항** (화면에 보이는 경우)
+**검색 결과에서 아래 정보가 보이도록 복사해서 붙여넣으세요.**
 
-**선택 정보**
+**필수**
+- 항공사
+- 출발시간
+- 도착시간
+- 도착일 표시: 같은 날 / `+1` / `+2`
+- 총 소요시간
+- 가격
+- 직항 또는 경유
+- 경유 시 경유 공항
+
+**있으면 함께 입력**
 - 수하물 포함 여부
-- 추가 수하물 무게 및 가격
-- 현재 Skyscanner/Google Flights 검색 페이지 URL
+- 수하물 중량
+- 추가 수하물 비용
 
-**가져오는 예시**
+**예시**
 ```text
 Emirates
 오후 11:40 → 오후 2:25 +1
@@ -1369,19 +1502,15 @@ Emirates
 ₩823,600
 ```
 
-아래 `검색 결과 텍스트 붙여넣기`에 여러 항공편을 한꺼번에 붙여넣어도 됩니다.
-프로그램이 항공사/시간/소요시간/경유/가격을 분리하고, 저장 전 표에서 수정할 수 있습니다.
+여러 항공편을 한꺼번에 붙여넣어도 됩니다.
+추출 후 아래 표에서 항공사·시간·가격·수하물 정보를 직접 수정할 수 있습니다.
 """)
-
 
         with st.expander("기술 정보 (평소에는 볼 필요 없음)", expanded=False):
             st.code(skey, language=None)
 
-        source_url = st.text_input("현재 검색 결과 페이지 URL (선택)", "", help="나중에 같은 검색 결과를 다시 열기 위한 용도입니다.")
-        st.file_uploader("검색 화면 캡처 (선택·참고용)", type=["png","jpg","jpeg","webp"])
-
         manual_text = st.text_area(
-            "검색 결과 텍스트 붙여넣기",
+            "검색 결과 텍스트 붙여넣기  ⓘ",
             height=260,
             placeholder="""예:
 Emirates
