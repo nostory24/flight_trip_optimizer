@@ -859,7 +859,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.10.3 · Cloud DB + Named Trips + JSON serialization hotfix")
+st.caption("Version 3.12 · 도시별 정확 도착 체크박스")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1000,7 +1000,7 @@ with tab1:
     with c1:
         home = norm_code(st.text_input("출발지 IATA", "ICN"))
     with c2:
-        visit_text = st.text_input("방문 도시 IATA (순서대로, 쉼표)", "IST,ATH")
+        visit_text = st.text_input("방문 도시 IATA (쉼표)", "IST,ATH", help="입력 순서는 상관없습니다. 아래 도착일 기준으로 자동 정렬합니다.")
         visits = [norm_code(x) for x in visit_text.split(",") if norm_code(x)]
     with c3:
         flex = st.selectbox("날짜 유연성", [0,1,2,3], index=1,
@@ -1014,6 +1014,7 @@ with tab1:
 
     departure_dates_by_city = {}
     arrival_dates_by_city = {}
+    exact_arrival_required = {}
 
     st.markdown("### 🗓️ 도시별 도착 / 출발 일정")
     st.caption(
@@ -1035,7 +1036,7 @@ with tab1:
         date(2027, 1, 8),
     ]
 
-    c_home1, c_home2 = st.columns(2)
+    c_home1, c_home2, c_home3 = st.columns([2, 2, 1])
     with c_home1:
         home_depart = st.date_input(
             f"{airport_label(home)} 출발",
@@ -1057,9 +1058,18 @@ with tab1:
         )
         arrival_dates_by_city[home] = home_arrive.isoformat()
 
+    with c_home3:
+        st.markdown("##### 도착 조건")
+        exact_arrival_required[home] = st.checkbox(
+            "정확 도착",
+            value=True,
+            key="exact_home_arrival",
+            help="체크 시 선택한 최종 도착일에 정확히 도착하는 항공편만 결과에 포함합니다."
+        )
+
     if visits:
         for i, node in enumerate(visits):
-            c_arr, c_dep = st.columns(2)
+            c_arr, c_exact, c_dep = st.columns([2, 1, 2])
             with c_arr:
                 arr_default = default_visit_arrivals[min(i, len(default_visit_arrivals)-1)]
                 arr = st.date_input(
@@ -1068,6 +1078,15 @@ with tab1:
                     key=f"arr_{node}_{i}"
                 )
                 arrival_dates_by_city[node] = arr.isoformat()
+
+            with c_exact:
+                st.markdown("##### 도착 조건")
+                exact_arrival_required[node] = st.checkbox(
+                    "정확 도착",
+                    value=True,
+                    key=f"exact_arrival_{node}_{i}",
+                    help="체크 시 이 날짜에 정확히 도착하는 항공편만 결과에 포함합니다."
+                )
 
             with c_dep:
                 dep_default = default_visit_departures[min(i, len(default_visit_departures)-1)]
@@ -1081,6 +1100,33 @@ with tab1:
             if dep < arr:
                 st.error(f"{airport_label(node)} 출발일은 도착일보다 빠를 수 없습니다.")
 
+    # User does not need to enter visit order separately.
+    # Sort automatically by arrival date, then departure date, then code.
+    sorted_visits = sorted(
+        visits,
+        key=lambda city: (
+            arrival_dates_by_city.get(city, "9999-12-31"),
+            departure_dates_by_city.get(city, "9999-12-31"),
+            city,
+        )
+    )
+
+    if sorted_visits:
+        st.info(
+            "자동 여행 순서: "
+            + " → ".join([airport_label(home)] + [airport_label(c) for c in sorted_visits] + [airport_label(home)])
+        )
+
+        # Chronology validation between consecutive stays.
+        for prev_city, next_city in zip(sorted_visits[:-1], sorted_visits[1:]):
+            prev_dep = departure_dates_by_city.get(prev_city)
+            next_arr = arrival_dates_by_city.get(next_city)
+            if prev_dep and next_arr and prev_dep > next_arr:
+                st.error(
+                    f"일정 충돌: {airport_label(prev_city)} 출발일({prev_dep})이 "
+                    f"{airport_label(next_city)} 도착일({next_arr})보다 늦습니다."
+                )
+
     c4, c5, c6 = st.columns(3)
     with c4:
         max_revisit = st.number_input("도시별 최대 재방문", 0, 2, 1)
@@ -1093,24 +1139,27 @@ with tab1:
         schedule_rows = [{
             "도시": airport_label(home),
             "도착": "-",
-            "출발": departure_dates_by_city.get(home, "")
+            "출발": departure_dates_by_city.get(home, ""),
+            "정확 도착": "-"
         }]
-        for city in visits:
+        for city in sorted_visits:
             schedule_rows.append({
                 "도시": airport_label(city),
                 "도착": arrival_dates_by_city.get(city, ""),
-                "출발": departure_dates_by_city.get(city, "")
+                "출발": departure_dates_by_city.get(city, ""),
+                "정확 도착": "✓" if exact_arrival_required.get(city, False) else "-"
             })
         schedule_rows.append({
             "도시": airport_label(home),
             "도착": arrival_dates_by_city.get(home, ""),
-            "출발": "-"
+            "출발": "-",
+            "정확 도착": "✓" if exact_arrival_required.get(home, False) else "-"
         })
         with st.expander("📅 입력한 전체 여행 일정 보기", expanded=True):
             st.dataframe(pd.DataFrame(schedule_rows), use_container_width=True, hide_index=True)
 
     if st.button("경로·발권 후보 생성", type="primary"):
-        routes = generate_physical_routes(home, visits, int(max_revisit), int(max_extra))
+        routes = generate_physical_routes(home, sorted_visits, int(max_revisit), int(max_extra))
         generated = []
         for ridx, route in enumerate(routes, 1):
             legs, patterns = generate_ticket_patterns(route, departure_dates_by_city)
@@ -1124,9 +1173,10 @@ with tab1:
                 })
         st.session_state.generated = {
             "home": home,
-            "visits": visits,
+            "visits": sorted_visits,
             "dates": departure_dates_by_city,
             "arrival_dates": arrival_dates_by_city,
+            "exact_arrival_required": exact_arrival_required,
             "home_final_arrival": arrival_dates_by_city.get(home),
             "flex": flex,
             "topn": topn,
@@ -1420,6 +1470,68 @@ Emirates
     else:
         st.caption("아직 저장된 항공편이 없습니다.")
 
+
+def _expected_arrival_date_for_city(generated_state, city):
+    if not generated_state:
+        return None
+
+    required_map = generated_state.get("exact_arrival_required", {})
+    # Backward compatibility: older saved trips did not have this map.
+    # Treat them as not enforced until the user checks the box and regenerates.
+    if not required_map.get(city, False):
+        return None
+
+    home = generated_state.get("home")
+    if city == home:
+        return generated_state.get("home_final_arrival") or generated_state.get("arrival_dates", {}).get(home)
+    return generated_state.get("arrival_dates", {}).get(city)
+
+def _actual_ticket_final_arrival_date(legs, ticket_idxs, offer):
+    """
+    Calculate the ticket's final arrival calendar date from:
+      final slice departure date + arrival_day_offset.
+
+    This is exact for one-way ticket records and for any saved ticket record whose
+    displayed arrival/+N corresponds to the ticket's final slice.
+    """
+    if not ticket_idxs:
+        return None
+    final_leg = legs[ticket_idxs[-1]]
+    try:
+        dep_date = datetime.strptime(final_leg.departure_date, "%Y-%m-%d").date()
+        offset = int(offer.get("arrival_day_offset", 0) or 0)
+        return (dep_date + timedelta(days=offset)).isoformat()
+    except Exception:
+        return None
+
+def combo_matches_exact_arrival_dates(pattern, combo, generated_state):
+    """
+    Enforce exact arrival date at every ticket boundary that ends at a planned city/home.
+    Returns (is_valid, reasons).
+
+    For a multi-city ticket stored as one combined offer, only that ticket's final
+    destination can be verified from the current single arrival/+N field.
+    """
+    reasons = []
+    for ticket_idxs, offer in zip(pattern["tickets"], combo):
+        if not ticket_idxs:
+            continue
+        final_leg = pattern["legs"][ticket_idxs[-1]]
+        dest = final_leg.destination
+        expected = _expected_arrival_date_for_city(generated_state, dest)
+        if not expected:
+            continue
+        actual = _actual_ticket_final_arrival_date(pattern["legs"], ticket_idxs, offer)
+        if not actual:
+            reasons.append(f"{airport_label(dest)} 실제 도착일 확인 불가")
+            return False, reasons
+        if actual != expected:
+            reasons.append(
+                f"{airport_label(dest)} 도착일 불일치: 실제 {actual} / 계획 {expected}"
+            )
+            return False, reasons
+    return True, reasons
+
 with tab3:
     st.subheader("전체 발권 조합 및 가격 Ranking")
 
@@ -1492,6 +1604,7 @@ with tab3:
             offer_map.setdefault(oo["search_key"], []).append(oo)
 
         plans = []
+        rejected_exact_arrival = []
         for p in st.session_state.generated["patterns"]:
             ticket_keys = [search_key_for_ticket(p["legs"], idxs) for idxs in p["tickets"]]
             if not all(k in offer_map and offer_map[k] for k in ticket_keys):
@@ -1510,6 +1623,16 @@ with tab3:
             ]
 
             for combo in itertools.product(*pools):
+                exact_ok, exact_reasons = combo_matches_exact_arrival_dates(
+                    p, combo, st.session_state.generated
+                )
+                if not exact_ok:
+                    rejected_exact_arrival.append({
+                        "패턴ID": p["pattern_id"],
+                        "이유": " / ".join(exact_reasons),
+                    })
+                    continue
+
                 base_total = sum(int(x.get("price_krw", 0) or 0) for x in combo)
                 baggage_total = sum(
                     int(x.get("baggage_extra_price", 0) or 0) if x.get("include_baggage") else 0
@@ -1550,6 +1673,17 @@ with tab3:
                         x.get("source_url","") for x in combo if x.get("source_url","")
                     ),
                 })
+
+        if rejected_exact_arrival:
+            st.info(
+                f"📅 체크된 `정확 도착` 조건으로 {len(rejected_exact_arrival)}개 조합을 자동 제외했습니다."
+            )
+            with st.expander("도착일 불일치로 제외된 조합 보기", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(rejected_exact_arrival).drop_duplicates(),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
         if plans:
             rdf = pd.DataFrame(plans)

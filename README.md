@@ -1,15 +1,27 @@
-# Flight Trip Optimizer v3.10.3
+# Flight Trip Optimizer v3.12
 
-Hotfix
-- `TypeError: Object of type Leg is not JSON serializable` 수정
-- DB 저장, 여행 저장, JSON 내보내기 모두 동일한 `_jsonable()` 직렬화 경로 사용
-- dataclass/날짜/list/set/기타 객체에 대한 안전한 fallback 추가
-- 화면 상단에 `Version 3.10.3` 표시 추가
+## 도시별 `정확 도착` 체크박스
 
-배포:
-1. GitHub의 `app.py`를 v3.10.3으로 교체
-2. Commit / Push
-3. Render 자동배포 완료 대기
-4. 화면 상단에 `Version 3.10.3`이 보이는지 확인
+각 도착일 옆에 `정확 도착` 옵션을 추가했습니다.
 
-`DATABASE_URL`은 변경할 필요 없습니다.
+예:
+- IST 도착 12/24 + 정확 도착 ✓
+  → 12/24 도착 항공편만 허용
+- ATH 도착 12/29 + 정확 도착 해제
+  → 12/29는 일정 참고용이며 도착일 필터 미적용
+- ICN 최종 도착 1/3 + 정확 도착 ✓
+  → 1/4 도착 귀국편은 Ranking에서 자동 제외
+
+## 자동 정렬
+방문 도시 입력 순서는 무시하고 도착일 → 출발일 → IATA 코드 순으로 자동 정렬합니다.
+
+## 저장
+`정확 도착` 체크 상태도 여행 데이터와 함께 Cloud DB/SQLite에 저장됩니다.
+
+## 기존 저장 여행
+v3.11 이전에 저장된 여행에는 체크 상태가 없으므로,
+불러온 후 필요한 도시에 `정확 도착`을 체크하고 `경로·발권 후보 생성`을 다시 누르면 됩니다.
+
+## 배포
+GitHub app.py 교체 → Commit/Push → Render 자동배포.
+DATABASE_URL은 변경할 필요 없습니다.
