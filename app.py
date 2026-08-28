@@ -411,6 +411,20 @@ def offer_uid(offer, idx=None):
     ]
     return "||".join(parts)
 
+def is_valid_offer(offer):
+    if not offer:
+        return False
+    dep = str(offer.get("departure_time", "") or "").strip()
+    arr = str(offer.get("arrival_time", "") or "").strip()
+    try:
+        price = int(offer.get("price_krw", 0) or 0)
+    except Exception:
+        price = 0
+    return bool(dep and arr and price > 0)
+
+def valid_offers_only(offers):
+    return [o for o in (offers or []) if is_valid_offer(o)]
+
 def _korean_ampm_to_24h(token: str) -> str:
     token = re.sub(r"\s+", " ", token.strip())
     m = re.match(r"(오전|오후)\s*(\d{1,2}):(\d{2})", token)
@@ -901,6 +915,8 @@ def load_named_trip(trip_id):
     # Keep current autosave state in sync too.
     save_state("generated", generated)
     save_all_offers(offers)
+    st.session_state["last_autosave_at"] = datetime.now().isoformat(timespec="seconds")
+    st.session_state["last_autosave_error"] = None
     return row["trip_name"]
 
 def rename_named_trip(trip_id, new_name):
@@ -954,6 +970,68 @@ def save_active_trip_if_any():
     if trip_id and trip_name and not DB_INIT_ERROR:
         save_named_trip(trip_name, trip_id=trip_id)
 
+
+def autosave_active_trip_from_form(
+    home,
+    itinerary_stays,
+    departure_dates_by_city,
+    arrival_dates_by_city,
+    exact_arrival_required,
+    flex,
+    topn,
+):
+    """
+    Persist the CURRENT visible travel form to the active named trip.
+
+    Streamlit reruns whenever a widget changes, so an already-named trip is
+    automatically refreshed after date/city/exact-arrival/Top-N changes.
+    Unnamed/new workspaces are intentionally not persisted as named trips.
+    """
+    trip_id = st.session_state.get("active_trip_id")
+    trip_name = st.session_state.get("active_trip_name")
+    if not trip_id or not trip_name or DB_INIT_ERROR:
+        return
+
+    try:
+        route, legs, ordered_stays = build_route_and_legs_from_stays(
+            home,
+            departure_dates_by_city.get(home, date.today().isoformat()),
+            itinerary_stays,
+        )
+        defs = generate_ticket_patterns_from_legs(route, legs)
+        patterns = [{
+            "route": route,
+            "legs": legs,
+            "kind": kind,
+            "tickets": tickets,
+            "pattern_id": f"R1-P{i+1}",
+        } for i, (kind, tickets) in enumerate(defs)]
+
+        st.session_state.generated = {
+            "home": home,
+            "visits": [s["city"] for s in ordered_stays],
+            "dates": dict(departure_dates_by_city),
+            "arrival_dates": dict(arrival_dates_by_city),
+            "exact_arrival_required": dict(exact_arrival_required),
+            "itinerary_stays": ordered_stays,
+            "home_final_arrival": arrival_dates_by_city.get(home),
+            "flex": int(flex),
+            "topn": int(topn),
+            "max_revisit": 0,
+            "max_extra": 0,
+            "patterns": patterns,
+        }
+
+        # Current autosave + named-trip snapshot.
+        save_state("generated", st.session_state.generated)
+        save_all_offers(valid_offers_only(st.session_state.get("offers", [])))
+        save_named_trip(trip_name, trip_id=trip_id)
+
+        st.session_state["last_autosave_at"] = datetime.now().isoformat(timespec="seconds")
+        st.session_state["last_autosave_error"] = None
+    except Exception as exc:
+        st.session_state["last_autosave_error"] = str(exc)
+
 try:
     ensure_trip_table()
 except Exception as exc:
@@ -975,7 +1053,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.17 · 사용자 지정 재방문 일정 지원")
+st.caption("Version 3.19 · 이름 있는 여행 실시간 자동저장")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -984,9 +1062,16 @@ with st.sidebar:
     active_name = st.session_state.get("active_trip_name")
     if active_name:
         st.success(f"현재 여행: {active_name}")
+        st.caption("🔄 자동저장 ON · 여행 조건 변경 시 Cloud DB에 자동 반영")
+        last_saved = st.session_state.get("last_autosave_at")
+        if last_saved:
+            st.caption(f"최근 자동저장: {last_saved.replace('T', ' ')}")
+        autosave_error = st.session_state.get("last_autosave_error")
+        if autosave_error:
+            st.warning(f"자동저장 오류: {autosave_error}")
     else:
         st.info("현재 여행: 새 작업")
-        st.caption("저장된 여행은 아래 목록에서 직접 불러오세요.")
+        st.caption("여행 이름을 한 번 저장하면 이후 변경사항부터 자동저장됩니다.")
 
     new_trip_name = st.text_input(
         "현재 작업을 여행으로 저장",
@@ -1013,6 +1098,8 @@ with st.sidebar:
             st.session_state.offers = []
             st.session_state.active_trip_id = None
             st.session_state.active_trip_name = None
+            st.session_state.pop("last_autosave_at", None)
+            st.session_state.pop("last_autosave_error", None)
             autosave()
             st.rerun()
 
@@ -1299,6 +1386,17 @@ with tab1:
     max_revisit = 0
     max_extra = 0
 
+    # Named trips are continuously persisted from the current visible form.
+    autosave_active_trip_from_form(
+        home=home,
+        itinerary_stays=itinerary_stays,
+        departure_dates_by_city=departure_dates_by_city,
+        arrival_dates_by_city=arrival_dates_by_city,
+        exact_arrival_required=exact_arrival_required,
+        flex=flex,
+        topn=topn,
+    )
+
     if st.button("경로·발권 후보 생성", type="primary"):
         route, legs, ordered_stays = build_route_and_legs_from_stays(
             home, departure_dates_by_city[home], itinerary_stays
@@ -1374,7 +1472,7 @@ with tab2:
         search_tasks = collect_unique_search_tasks(patterns)
 
         saved_counts = {}
-        for oo in st.session_state.offers:
+        for oo in valid_offers_only(st.session_state.offers):
             saved_counts[oo["search_key"]] = saved_counts.get(oo["search_key"], 0) + 1
 
         # Master checklist: this is the important "what do I search?" view.
@@ -1572,10 +1670,13 @@ Emirates
 
         if st.button("선택 항공편 저장", type="primary"):
             saved = 0
+            invalid_skipped = 0
+
             for _, r in edited.iterrows():
                 if not bool(r.get("선택", True)):
                     continue
-                st.session_state.offers.append({
+
+                candidate = {
                     "search_key": str(r["search_key"]),
                     "airline": str(r.get("항공사","")),
                     "departure_time": str(r.get("출발시간","")),
@@ -1589,12 +1690,33 @@ Emirates
                     "baggage_extra_price": int(r.get("추가수하물가격",0) or 0),
                     "include_baggage": bool(r.get("수하물포함체크",False)),
                     "source_url": str(r.get("source_url","")),
-                })
+                }
+
+                if not is_valid_offer(candidate):
+                    invalid_skipped += 1
+                    continue
+
+                st.session_state.offers.append(candidate)
                 saved += 1
+
+            st.session_state.offers = valid_offers_only(st.session_state.offers)
             autosave()
-            st.success(f"{saved}개 저장 · SQLite 자동저장 완료")
+
+            if saved:
+                st.success(f"{saved}개 유효 항공편 저장 완료")
+            if invalid_skipped:
+                st.warning(
+                    f"{invalid_skipped}개 행은 출발시간/도착시간/가격이 없어 저장하지 않았습니다."
+                )
 
     st.markdown("### 저장된 항공편")
+
+    legacy_invalid_count = len(st.session_state.offers) - len(valid_offers_only(st.session_state.offers))
+    if legacy_invalid_count > 0:
+        st.session_state.offers = valid_offers_only(st.session_state.offers)
+        autosave()
+        st.info(f"기존 빈 데이터 {legacy_invalid_count}개를 자동 정리했습니다.")
+
     if st.session_state.offers:
         odf = pd.DataFrame(st.session_state.offers)
         odf["적용가격"] = odf["price_krw"] + odf.apply(
@@ -1696,7 +1818,8 @@ with tab3:
         )
 
         baggage_rows = []
-        for idx, o in enumerate(st.session_state.offers):
+        valid_current_offers = valid_offers_only(st.session_state.offers)
+        for idx, o in enumerate(valid_current_offers):
             baggage_rows.append({
                 "offer_uid": offer_uid(o, idx),
                 "항공사": o.get("airline", ""),
@@ -1733,7 +1856,7 @@ with tab3:
         if st.button("수하물 반영 → 총액/순위 자동 재계산", type="primary"):
             uid_to_row = {str(r["offer_uid"]): r for _, r in edited_baggage.iterrows()}
             updated = []
-            for idx, o in enumerate(st.session_state.offers):
+            for idx, o in enumerate(valid_current_offers):
                 uid = offer_uid(o, idx)
                 r = uid_to_row.get(uid)
                 if r is not None:
@@ -1749,7 +1872,7 @@ with tab3:
             st.rerun()
 
         offer_map = {}
-        for idx, o in enumerate(st.session_state.offers):
+        for idx, o in enumerate(valid_offers_only(st.session_state.offers)):
             oo = dict(o)
             oo["_uid"] = offer_uid(o, idx)
             offer_map.setdefault(oo["search_key"], []).append(oo)
