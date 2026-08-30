@@ -1120,7 +1120,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.20.1 · 입력완료 후 조합탭 유지")
+st.caption("Version 3.20.2 · Top 조합 구매항공권 상세")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -2100,6 +2100,10 @@ with tab3:
                     "검색링크": " || ".join(
                         x.get("source_url","") for x in combo if x.get("source_url","")
                     ),
+                    # Keep the exact source offers that make up this ranked plan.
+                    # This is used by Top 결과 상세 so the user can identify
+                    # the actual tickets/flights to purchase.
+                    "_combo_offers": [dict(x) for x in combo],
                 })
 
         if rejected_exact_arrival:
@@ -2177,10 +2181,90 @@ with tab3:
             c2.metric("수하물 추가", f'₩{int(selected_row["수하물추가비용(KRW)"]):,}')
             c3.metric("적용 총액", f'₩{int(selected_row["적용총액(KRW)"]):,}')
 
-            st.write("**수하물 상태**")
-            st.write(selected_row["수하물"])
-            st.write("**항공편**")
-            st.write(selected_row["항공편"])
+            st.markdown("#### 🎫 실제 구매해야 할 항공권")
+            selected_combo = selected_row.get("_combo_offers", [])
+            if isinstance(selected_combo, list) and selected_combo:
+                purchase_rows = []
+                for ticket_no, x in enumerate(selected_combo, 1):
+                    base_price = int(x.get("price_krw", 0) or 0)
+                    bag_fee = (
+                        int(x.get("baggage_extra_price", 0) or 0)
+                        if x.get("include_baggage") else 0
+                    )
+                    day_offset = int(x.get("arrival_day_offset", 0) or 0)
+                    arrival_suffix = f"+{day_offset}일" if day_offset > 0 else ""
+                    purchase_rows.append({
+                        "구매": ticket_no,
+                        "검색/발권 구간": x.get("search_key", ""),
+                        "항공사": x.get("airline", "") or "확인 필요",
+                        "출발시간": x.get("departure_time", "") or "확인 필요",
+                        "도착시간": (
+                            f'{x.get("arrival_time", "")} {arrival_suffix}'.strip()
+                            if x.get("arrival_time") else "확인 필요"
+                        ),
+                        "경유": x.get("stops", "") or "확인 필요",
+                        "소요시간": (
+                            f'{int(x.get("duration_min",0) or 0)//60}시간 '
+                            f'{int(x.get("duration_min",0) or 0)%60}분'
+                            if int(x.get("duration_min",0) or 0) > 0 else "확인 필요"
+                        ),
+                        "항공권가격(KRW)": base_price,
+                        "수하물": x.get("baggage_note", "") or "확인 필요",
+                        "추가수하물(kg)": int(x.get("baggage_extra_kg", 0) or 0),
+                        "수하물추가비용(KRW)": bag_fee,
+                        "구매가격(KRW)": base_price + bag_fee,
+                    })
+
+                purchase_df = pd.DataFrame(purchase_rows)
+                st.dataframe(
+                    purchase_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "항공권가격(KRW)": st.column_config.NumberColumn(format="%d"),
+                        "수하물추가비용(KRW)": st.column_config.NumberColumn(format="%d"),
+                        "구매가격(KRW)": st.column_config.NumberColumn(format="%d"),
+                    },
+                )
+
+                st.caption(
+                    "위 표의 각 행이 실제로 구매해야 하는 항공권 1개입니다. "
+                    "왕복/다구간 검색 결과는 한 행에 하나의 발권 항목으로 표시됩니다."
+                )
+
+                for ticket_no, x in enumerate(selected_combo, 1):
+                    label = x.get("search_key", "") or f"항공권 {ticket_no}"
+                    airline = x.get("airline", "") or "항공사 확인 필요"
+                    dep = x.get("departure_time", "") or "?"
+                    arr = x.get("arrival_time", "") or "?"
+                    day_offset = int(x.get("arrival_day_offset", 0) or 0)
+                    day_txt = f" (+{day_offset}일)" if day_offset > 0 else ""
+                    stops = x.get("stops", "") or "경유정보 확인 필요"
+                    price = int(x.get("price_krw", 0) or 0)
+                    bag_fee = int(x.get("baggage_extra_price", 0) or 0) if x.get("include_baggage") else 0
+
+                    with st.expander(
+                        f'{ticket_no}. {label} | {airline} | {dep} → {arr}{day_txt} | ₩{price + bag_fee:,}',
+                        expanded=True,
+                    ):
+                        st.write(f"**항공사:** {airline}")
+                        st.write(f"**출발 → 도착:** {dep} → {arr}{day_txt}")
+                        st.write(f"**경유:** {stops}")
+                        if int(x.get("duration_min", 0) or 0) > 0:
+                            mins = int(x.get("duration_min", 0) or 0)
+                            st.write(f"**소요시간:** {mins//60}시간 {mins%60}분")
+                        st.write(f"**항공권 가격:** ₩{price:,}")
+                        st.write(f"**수하물:** {x.get('baggage_note','') or '확인 필요'}")
+                        if x.get("include_baggage"):
+                            st.write(
+                                f"**추가 수하물:** +{int(x.get('baggage_extra_kg',0) or 0)}kg "
+                                f"/ +₩{bag_fee:,}"
+                            )
+                        if x.get("source_url"):
+                            st.write(f"**검색 결과 URL:** {x.get('source_url')}")
+
+            else:
+                st.warning("이 조합을 구성한 원본 항공편 상세정보를 찾지 못했습니다.")
 
             csv_df = rdf[display_cols].head(topn)
             st.download_button(
