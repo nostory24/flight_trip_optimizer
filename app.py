@@ -166,6 +166,83 @@ def generate_ticket_patterns_from_legs(route: List[str], legs: List[Leg]):
             unique.append((kind, tickets))
     return unique
 
+
+def build_side_trip_alternative(home: str, ordered_stays: list, home_departure: str):
+    """
+    Build one practical side-trip alternative for the LAST excursion before home.
+
+    Example input stays:
+      IST -> ATH -> JTR
+    Base route:
+      ICN -> IST -> ATH -> JTR -> ICN
+
+    Alternative:
+      ICN -> IST -> ATH -> JTR -> ATH -> ICN
+
+    The return from JTR to ATH uses JTR's departure date.
+    ATH -> ICN also uses that same date as the earliest return-home search date.
+    This alternative is generated only for the last two distinct stay cities and
+    does not create arbitrary revisits to older cities.
+    """
+    if len(ordered_stays) < 2:
+        return None
+
+    base = ordered_stays[-2]
+    side = ordered_stays[-1]
+
+    if base["city"] == side["city"]:
+        return None
+
+    # If user already explicitly added the base city again after side city,
+    # there is no need to synthesize this alternative.
+    # (ordered_stays is chronological; here side is currently last.)
+    base_city = base["city"]
+    side_city = side["city"]
+    side_dep = side["departure_date"]
+
+    route = [home] + [s["city"] for s in ordered_stays[:-1]] + [side_city, base_city, home]
+
+    legs = []
+    if ordered_stays:
+        legs.append(Leg(home, ordered_stays[0]["city"], home_departure))
+        for i in range(len(ordered_stays) - 2):
+            legs.append(Leg(
+                ordered_stays[i]["city"],
+                ordered_stays[i+1]["city"],
+                ordered_stays[i]["departure_date"],
+            ))
+
+        # base -> side
+        legs.append(Leg(base_city, side_city, base["departure_date"]))
+        # side -> base
+        legs.append(Leg(side_city, base_city, side_dep))
+        # base -> home
+        legs.append(Leg(base_city, home, side_dep))
+
+    # Ticket patterns for this synthesized physical alternative.
+    patterns = []
+    # All contiguous partitions.
+    for groups in all_contiguous_partitions(len(legs)):
+        tickets = [list(range(s, e)) for s, e in groups]
+        patterns.append(("side_trip_contiguous", tickets))
+
+    # Explicit side-trip round trip + other legs separately.
+    if len(legs) >= 3:
+        out_idx = len(legs) - 3
+        back_idx = len(legs) - 2
+        tickets = [[i] for i in range(len(legs)) if i not in (out_idx, back_idx)]
+        tickets.append([out_idx, back_idx])
+        patterns.append(("side_trip_roundtrip", tickets))
+
+    seen, unique = set(), []
+    for kind, tickets in patterns:
+        key = tuple(sorted(tuple(sorted(t)) for t in tickets))
+        if key not in seen:
+            seen.add(key)
+            unique.append((kind, tickets))
+
+    return route, legs, unique
+
 def all_contiguous_partitions(nlegs: int):
     if nlegs <= 0:
         return []
@@ -261,6 +338,18 @@ def rebuild_generated_from_saved_state(generated):
         "tickets": tickets,
         "pattern_id": f"R1-P{i+1}",
     } for i, (kind, tickets) in enumerate(defs)]
+
+    side_alt = build_side_trip_alternative(home, ordered, home_departure)
+    if side_alt:
+        side_route, side_legs, side_defs = side_alt
+        for i, (kind, tickets) in enumerate(side_defs):
+            patterns.append({
+                "route": side_route,
+                "legs": side_legs,
+                "kind": kind,
+                "tickets": tickets,
+                "pattern_id": f"R2-P{i+1}",
+            })
 
     rebuilt = dict(generated)
     rebuilt["itinerary_stays"] = ordered
@@ -1053,7 +1142,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.19 · 이름 있는 여행 실시간 자동저장")
+st.caption("Version 3.19.1 · 마지막 도시 사이드트립 발권 후보 복원")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1410,6 +1499,24 @@ with tab1:
             "pattern_id": f"R1-P{i+1}"
         } for i, (kind, tickets) in enumerate(defs)]
         routes = [route]
+
+        # Practical last-city side-trip alternative.
+        # e.g. ATH -> JTR -> ICN can additionally be compared as
+        # ATH <-> JTR + ATH -> ICN.
+        side_alt = build_side_trip_alternative(
+            home, ordered_stays, departure_dates_by_city[home]
+        )
+        if side_alt:
+            side_route, side_legs, side_defs = side_alt
+            routes.append(side_route)
+            for i, (kind, tickets) in enumerate(side_defs):
+                generated.append({
+                    "route": side_route,
+                    "legs": side_legs,
+                    "kind": kind,
+                    "tickets": tickets,
+                    "pattern_id": f"R2-P{i+1}"
+                })
         st.session_state.generated = {
             "home": home,
             "visits": sorted_visits,
