@@ -1120,7 +1120,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.20.0 · 일정에 없는 역방향 후보 제거")
+st.caption("Version 3.20.1 · 입력완료 후 조합탭 유지")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1648,317 +1648,316 @@ with tab2:
 
         if not pending_search_tasks:
             st.success("체크리스트의 모든 항공권 입력이 완료되었습니다.")
-            st.stop()
-
-        task_labels = [
-            f'{original_no}. [{t["type"]}] {t["title"]} — {t["summary"]}'
-            for original_no, t in pending_search_tasks
-        ]
-
-        # Reset selector if its previous value belonged to a task that just became completed.
-        current_selector = st.session_state.get("search_task_selector")
-        if current_selector not in task_labels:
-            st.session_state["search_task_selector"] = task_labels[0]
-
-        selected_task_label = st.selectbox(
-            "지금 검색/입력할 항공권 선택",
-            task_labels,
-            key="search_task_selector"
-        )
-        selected_original_no, selected_task = pending_search_tasks[
-            task_labels.index(selected_task_label)
-        ]
-
-        p2_legs = selected_task["legs"]
-        idxs = selected_task["idxs"]
-        skey = selected_task["key"]
-        search_rows = selected_task["rows"]
-        search_summary = selected_task["summary"]
-
-        st.markdown("### 🔎 지금 검색해야 할 항공권")
-        st.warning(
-            f'**{selected_task["type"]} 검색**\n\n'
-            f'**{selected_task["title"]}**\n\n'
-            + search_summary
-        )
-
-        st.dataframe(
-            pd.DataFrame(search_rows),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        if selected_task["type"] == "편도":
-            st.caption("Skyscanner / Google Flights에서 편도(One-way)로 검색하세요.")
-        elif selected_task["type"] == "왕복":
-            a = p2_legs[idxs[0]]
-            b = p2_legs[idxs[1]]
-            st.caption(
-                f"Skyscanner / Google Flights에서 왕복(Round-trip)으로 검색하세요. "
-                f"가는 날 {a.departure_date} / 오는 날 {b.departure_date}"
-            )
+            st.info("3. 조합/랭킹 탭에서 최종 조합을 확인하세요.")
         else:
-            st.caption("Skyscanner / Google Flights에서 다구간(Multi-city)으로 검색하세요.")
+            task_labels = [
+                f'{original_no}. [{t["type"]}] {t["title"]} — {t["summary"]}'
+                for original_no, t in pending_search_tasks
+            ]
 
-        selected_ticket_legs = [p2_legs[i] for i in idxs]
-        c_search1, c_search2 = st.columns(2)
-        with c_search1:
-            st.link_button(
-                "Google Flights에서 이 티켓 검색",
-                google_multicity_url(selected_ticket_legs)
-                if len(selected_ticket_legs) > 1
-                else google_oneway_url(
-                    selected_ticket_legs[0].origin,
-                    selected_ticket_legs[0].destination,
-                    selected_ticket_legs[0].departure_date
-                ),
-                use_container_width=True
+            # Reset selector if its previous value belonged to a task that just became completed.
+            current_selector = st.session_state.get("search_task_selector")
+            if current_selector not in task_labels:
+                st.session_state["search_task_selector"] = task_labels[0]
+
+            selected_task_label = st.selectbox(
+                "지금 검색/입력할 항공권 선택",
+                task_labels,
+                key="search_task_selector"
             )
-        with c_search2:
-            st.link_button(
-                "Skyscanner에서 이 티켓 검색",
-                skyscanner_multicity_url(selected_ticket_legs)
-                if len(selected_ticket_legs) > 1
-                else skyscanner_oneway_url(
-                    selected_ticket_legs[0].origin,
-                    selected_ticket_legs[0].destination,
-                    selected_ticket_legs[0].departure_date
-                ),
-                use_container_width=True
+            selected_original_no, selected_task = pending_search_tasks[
+                task_labels.index(selected_task_label)
+            ]
+
+            p2_legs = selected_task["legs"]
+            idxs = selected_task["idxs"]
+            skey = selected_task["key"]
+            search_rows = selected_task["rows"]
+            search_summary = selected_task["summary"]
+
+            st.markdown("### 🔎 지금 검색해야 할 항공권")
+            st.warning(
+                f'**{selected_task["type"]} 검색**\n\n'
+                f'**{selected_task["title"]}**\n\n'
+                + search_summary
             )
 
-        # Keep the input area compact. Detailed guidance is available on demand.
-        source_url = ""
+            st.dataframe(
+                pd.DataFrame(search_rows),
+                use_container_width=True,
+                hide_index=True
+            )
 
-        with st.expander("ⓘ 붙여넣을 정보 보기", expanded=False):
-            st.markdown("""
-**검색 결과에서 아래 정보가 보이도록 복사해서 붙여넣으세요.**
+            if selected_task["type"] == "편도":
+                st.caption("Skyscanner / Google Flights에서 편도(One-way)로 검색하세요.")
+            elif selected_task["type"] == "왕복":
+                a = p2_legs[idxs[0]]
+                b = p2_legs[idxs[1]]
+                st.caption(
+                    f"Skyscanner / Google Flights에서 왕복(Round-trip)으로 검색하세요. "
+                    f"가는 날 {a.departure_date} / 오는 날 {b.departure_date}"
+                )
+            else:
+                st.caption("Skyscanner / Google Flights에서 다구간(Multi-city)으로 검색하세요.")
 
-**필수**
-- 항공사
-- 출발시간
-- 도착시간
-- 도착일 표시: 같은 날 / `+1` / `+2`
-- 총 소요시간
-- 가격
-- 직항 또는 경유
-- 경유 시 경유 공항
-
-**있으면 함께 입력**
-- 수하물 포함 여부
-- 수하물 중량
-- 추가 수하물 비용
-
-**예시**
-```text
-Emirates
-오후 11:40 → 오후 2:25 +1
-20시간 45분
-1회 경유 DXB
-₩823,600
-```
-
-여러 항공편을 한꺼번에 붙여넣어도 됩니다.
-추출 후 아래 표에서 항공사·시간·가격·수하물 정보를 직접 수정할 수 있습니다.
-""")
-
-        with st.expander("기술 정보 (평소에는 볼 필요 없음)", expanded=False):
-            st.code(skey, language=None)
-
-        # Streamlit widget state must be cleared BEFORE the widget is instantiated.
-        if st.session_state.pop("clear_paste_after_save", False):
-            st.session_state["search_result_paste_text"] = ""
-            st.session_state.pop("parsed_rows", None)
-            st.session_state.pop("parsed_search_key", None)
-
-        manual_text = st.text_area(
-            "검색 결과 텍스트 붙여넣기  ⓘ",
-            height=260,
-            key="search_result_paste_text",
-            placeholder="""예:
-Emirates
-오후 11:40 → 오후 2:25 +1
-20시간 45분
-1회 경유 DXB
-₩823,600
-
-터키항공
-오전 12:05 → 오전 5:55
-11시간 50분
-직항
-₩840,200"""
-        )
-
-        if st.button("가격·시간 후보 추출"):
-            rows = parse_result_text(manual_text, skey, source_url)
-            st.session_state["parsed_rows"] = rows
-            if not rows:
-                st.warning("자동 추출 후보가 없습니다. 아래 표에 직접 입력해도 됩니다.")
-
-        rows = st.session_state.get("parsed_rows", [])
-        if rows:
-            df = pd.DataFrame(rows)
-        else:
-            df = pd.DataFrame([{
-                "선택": True, "search_key": skey, "항공사": "", "출발시간": "", "도착시간": "",
-                "도착+일": 0, "소요시간(분)": 0, "경유": "", "가격(KRW)": 0,
-                "수하물": "", "추가수하물kg": 0, "추가수하물가격": 0, "수하물포함체크": False,
-                "source_url": source_url, "원문": ""
-            }])
-
-        edited = st.data_editor(
-            df,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "선택": st.column_config.CheckboxColumn(),
-                "가격(KRW)": st.column_config.NumberColumn(format="%d"),
-                "추가수하물가격": st.column_config.NumberColumn(format="%d"),
-                "수하물포함체크": st.column_config.CheckboxColumn("수하물 비용 합산"),
-            },
-            key="offer_editor_v3"
-        )
-
-        if st.button("선택 항공편 저장", type="primary"):
-            saved = 0
-            invalid_skipped = 0
-
-            for _, r in edited.iterrows():
-                if not bool(r.get("선택", True)):
-                    continue
-
-                candidate = {
-                    "search_key": str(r["search_key"]),
-                    "airline": str(r.get("항공사","")),
-                    "departure_time": str(r.get("출발시간","")),
-                    "arrival_time": str(r.get("도착시간","")),
-                    "arrival_day_offset": int(r.get("도착+일",0) or 0),
-                    "duration_min": int(r.get("소요시간(분)",0) or 0),
-                    "stops": str(r.get("경유","")),
-                    "price_krw": int(r.get("가격(KRW)",0) or 0),
-                    "baggage_note": str(r.get("수하물","")),
-                    "baggage_extra_kg": int(r.get("추가수하물kg",0) or 0),
-                    "baggage_extra_price": int(r.get("추가수하물가격",0) or 0),
-                    "include_baggage": bool(r.get("수하물포함체크",False)),
-                    "source_url": str(r.get("source_url","")),
-                }
-
-                if not is_valid_offer(candidate):
-                    invalid_skipped += 1
-                    continue
-
-                st.session_state.offers.append(candidate)
-                saved += 1
-
-            st.session_state.offers = valid_offers_only(st.session_state.offers)
-            autosave()
-
-            if saved:
-                # Do not modify the text_area key in the same run after instantiation.
-                # Mark it for clearing, then rerun; the next run clears it before widget creation.
-                st.session_state["clear_paste_after_save"] = True
-                st.success(f"{saved}개 유효 항공편 저장 완료")
-                st.rerun()
-            if invalid_skipped:
-                st.warning(
-                    f"{invalid_skipped}개 행은 출발시간/도착시간/가격이 없어 저장하지 않았습니다."
+            selected_ticket_legs = [p2_legs[i] for i in idxs]
+            c_search1, c_search2 = st.columns(2)
+            with c_search1:
+                st.link_button(
+                    "Google Flights에서 이 티켓 검색",
+                    google_multicity_url(selected_ticket_legs)
+                    if len(selected_ticket_legs) > 1
+                    else google_oneway_url(
+                        selected_ticket_legs[0].origin,
+                        selected_ticket_legs[0].destination,
+                        selected_ticket_legs[0].departure_date
+                    ),
+                    use_container_width=True
+                )
+            with c_search2:
+                st.link_button(
+                    "Skyscanner에서 이 티켓 검색",
+                    skyscanner_multicity_url(selected_ticket_legs)
+                    if len(selected_ticket_legs) > 1
+                    else skyscanner_oneway_url(
+                        selected_ticket_legs[0].origin,
+                        selected_ticket_legs[0].destination,
+                        selected_ticket_legs[0].departure_date
+                    ),
+                    use_container_width=True
                 )
 
-    st.markdown("### 저장된 항공편")
+            # Keep the input area compact. Detailed guidance is available on demand.
+            source_url = ""
 
-    legacy_invalid_count = len(st.session_state.offers) - len(valid_offers_only(st.session_state.offers))
-    if legacy_invalid_count > 0:
-        st.session_state.offers = valid_offers_only(st.session_state.offers)
-        autosave()
-        st.info(f"기존 빈 데이터 {legacy_invalid_count}개를 자동 정리했습니다.")
+            with st.expander("ⓘ 붙여넣을 정보 보기", expanded=False):
+                st.markdown("""
+    **검색 결과에서 아래 정보가 보이도록 복사해서 붙여넣으세요.**
 
-    if st.session_state.offers:
-        odf = pd.DataFrame(st.session_state.offers)
-        odf["적용가격"] = odf["price_krw"] + odf.apply(
-            lambda x: x["baggage_extra_price"] if x["include_baggage"] else 0, axis=1)
-        edited_offers = st.data_editor(
-            odf, use_container_width=True,
-            column_config={"include_baggage": st.column_config.CheckboxColumn("수하물 합산")},
-            key="saved_offer_editor_v3"
-        )
-        if st.button("수하물 체크/수정 반영"):
-            st.session_state.offers = edited_offers.drop(columns=["적용가격"], errors="ignore").to_dict("records")
+    **필수**
+    - 항공사
+    - 출발시간
+    - 도착시간
+    - 도착일 표시: 같은 날 / `+1` / `+2`
+    - 총 소요시간
+    - 가격
+    - 직항 또는 경유
+    - 경유 시 경유 공항
+
+    **있으면 함께 입력**
+    - 수하물 포함 여부
+    - 수하물 중량
+    - 추가 수하물 비용
+
+    **예시**
+    ```text
+    Emirates
+    오후 11:40 → 오후 2:25 +1
+    20시간 45분
+    1회 경유 DXB
+    ₩823,600
+    ```
+
+    여러 항공편을 한꺼번에 붙여넣어도 됩니다.
+    추출 후 아래 표에서 항공사·시간·가격·수하물 정보를 직접 수정할 수 있습니다.
+    """)
+
+            with st.expander("기술 정보 (평소에는 볼 필요 없음)", expanded=False):
+                st.code(skey, language=None)
+
+            # Streamlit widget state must be cleared BEFORE the widget is instantiated.
+            if st.session_state.pop("clear_paste_after_save", False):
+                st.session_state["search_result_paste_text"] = ""
+                st.session_state.pop("parsed_rows", None)
+                st.session_state.pop("parsed_search_key", None)
+
+            manual_text = st.text_area(
+                "검색 결과 텍스트 붙여넣기  ⓘ",
+                height=260,
+                key="search_result_paste_text",
+                placeholder="""예:
+    Emirates
+    오후 11:40 → 오후 2:25 +1
+    20시간 45분
+    1회 경유 DXB
+    ₩823,600
+
+    터키항공
+    오전 12:05 → 오전 5:55
+    11시간 50분
+    직항
+    ₩840,200"""
+            )
+
+            if st.button("가격·시간 후보 추출"):
+                rows = parse_result_text(manual_text, skey, source_url)
+                st.session_state["parsed_rows"] = rows
+                if not rows:
+                    st.warning("자동 추출 후보가 없습니다. 아래 표에 직접 입력해도 됩니다.")
+
+            rows = st.session_state.get("parsed_rows", [])
+            if rows:
+                df = pd.DataFrame(rows)
+            else:
+                df = pd.DataFrame([{
+                    "선택": True, "search_key": skey, "항공사": "", "출발시간": "", "도착시간": "",
+                    "도착+일": 0, "소요시간(분)": 0, "경유": "", "가격(KRW)": 0,
+                    "수하물": "", "추가수하물kg": 0, "추가수하물가격": 0, "수하물포함체크": False,
+                    "source_url": source_url, "원문": ""
+                }])
+
+            edited = st.data_editor(
+                df,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "선택": st.column_config.CheckboxColumn(),
+                    "가격(KRW)": st.column_config.NumberColumn(format="%d"),
+                    "추가수하물가격": st.column_config.NumberColumn(format="%d"),
+                    "수하물포함체크": st.column_config.CheckboxColumn("수하물 비용 합산"),
+                },
+                key="offer_editor_v3"
+            )
+
+            if st.button("선택 항공편 저장", type="primary"):
+                saved = 0
+                invalid_skipped = 0
+
+                for _, r in edited.iterrows():
+                    if not bool(r.get("선택", True)):
+                        continue
+
+                    candidate = {
+                        "search_key": str(r["search_key"]),
+                        "airline": str(r.get("항공사","")),
+                        "departure_time": str(r.get("출발시간","")),
+                        "arrival_time": str(r.get("도착시간","")),
+                        "arrival_day_offset": int(r.get("도착+일",0) or 0),
+                        "duration_min": int(r.get("소요시간(분)",0) or 0),
+                        "stops": str(r.get("경유","")),
+                        "price_krw": int(r.get("가격(KRW)",0) or 0),
+                        "baggage_note": str(r.get("수하물","")),
+                        "baggage_extra_kg": int(r.get("추가수하물kg",0) or 0),
+                        "baggage_extra_price": int(r.get("추가수하물가격",0) or 0),
+                        "include_baggage": bool(r.get("수하물포함체크",False)),
+                        "source_url": str(r.get("source_url","")),
+                    }
+
+                    if not is_valid_offer(candidate):
+                        invalid_skipped += 1
+                        continue
+
+                    st.session_state.offers.append(candidate)
+                    saved += 1
+
+                st.session_state.offers = valid_offers_only(st.session_state.offers)
+                autosave()
+
+                if saved:
+                    # Do not modify the text_area key in the same run after instantiation.
+                    # Mark it for clearing, then rerun; the next run clears it before widget creation.
+                    st.session_state["clear_paste_after_save"] = True
+                    st.success(f"{saved}개 유효 항공편 저장 완료")
+                    st.rerun()
+                if invalid_skipped:
+                    st.warning(
+                        f"{invalid_skipped}개 행은 출발시간/도착시간/가격이 없어 저장하지 않았습니다."
+                    )
+
+        st.markdown("### 저장된 항공편")
+
+        legacy_invalid_count = len(st.session_state.offers) - len(valid_offers_only(st.session_state.offers))
+        if legacy_invalid_count > 0:
+            st.session_state.offers = valid_offers_only(st.session_state.offers)
             autosave()
-            st.rerun()
-        if st.button("저장 항공편 전체 삭제"):
-            st.session_state.offers = []
-            autosave()
-            st.rerun()
-    else:
-        st.caption("아직 저장된 항공편이 없습니다.")
+            st.info(f"기존 빈 데이터 {legacy_invalid_count}개를 자동 정리했습니다.")
+
+        if st.session_state.offers:
+            odf = pd.DataFrame(st.session_state.offers)
+            odf["적용가격"] = odf["price_krw"] + odf.apply(
+                lambda x: x["baggage_extra_price"] if x["include_baggage"] else 0, axis=1)
+            edited_offers = st.data_editor(
+                odf, use_container_width=True,
+                column_config={"include_baggage": st.column_config.CheckboxColumn("수하물 합산")},
+                key="saved_offer_editor_v3"
+            )
+            if st.button("수하물 체크/수정 반영"):
+                st.session_state.offers = edited_offers.drop(columns=["적용가격"], errors="ignore").to_dict("records")
+                autosave()
+                st.rerun()
+            if st.button("저장 항공편 전체 삭제"):
+                st.session_state.offers = []
+                autosave()
+                st.rerun()
+        else:
+            st.caption("아직 저장된 항공편이 없습니다.")
 
 
-def _expected_arrival_date_for_city(generated_state, city):
-    if not generated_state:
-        return None
+    def _expected_arrival_date_for_city(generated_state, city):
+        if not generated_state:
+            return None
 
-    required_map = generated_state.get("exact_arrival_required", {})
-    # Backward compatibility: older saved trips did not have this map.
-    # Treat them as not enforced until the user checks the box and regenerates.
-    if not required_map.get(city, False):
-        return None
+        required_map = generated_state.get("exact_arrival_required", {})
+        # Backward compatibility: older saved trips did not have this map.
+        # Treat them as not enforced until the user checks the box and regenerates.
+        if not required_map.get(city, False):
+            return None
 
-    home = generated_state.get("home")
-    if city == home:
-        return generated_state.get("home_final_arrival") or generated_state.get("arrival_dates", {}).get(home)
-    return generated_state.get("arrival_dates", {}).get(city)
+        home = generated_state.get("home")
+        if city == home:
+            return generated_state.get("home_final_arrival") or generated_state.get("arrival_dates", {}).get(home)
+        return generated_state.get("arrival_dates", {}).get(city)
 
-def _actual_ticket_final_arrival_date(legs, ticket_idxs, offer):
-    """
-    Calculate the ticket's final arrival calendar date from:
-      final slice departure date + arrival_day_offset.
+    def _actual_ticket_final_arrival_date(legs, ticket_idxs, offer):
+        """
+        Calculate the ticket's final arrival calendar date from:
+          final slice departure date + arrival_day_offset.
 
-    This is exact for one-way ticket records and for any saved ticket record whose
-    displayed arrival/+N corresponds to the ticket's final slice.
-    """
-    if not ticket_idxs:
-        return None
-    final_leg = legs[ticket_idxs[-1]]
-    try:
-        dep_date = datetime.strptime(final_leg.departure_date, "%Y-%m-%d").date()
-        offset = int(offer.get("arrival_day_offset", 0) or 0)
-        return (dep_date + timedelta(days=offset)).isoformat()
-    except Exception:
-        return None
-
-def combo_matches_exact_arrival_dates(pattern, combo, generated_state):
-    reasons = []
-    stays = generated_state.get("itinerary_stays") or []
-    home = generated_state.get("home")
-    home_exact = (generated_state.get("exact_arrival_required") or {}).get(home, False)
-
-    expected_by_leg = {}
-    for i, stay in enumerate(stays):
-        if stay.get("exact_arrival"):
-            expected_by_leg[i] = stay.get("arrival_date")
-
-    if home_exact and pattern.get("legs"):
-        expected_by_leg[len(pattern["legs"]) - 1] = (
-            generated_state.get("home_final_arrival")
-            or (generated_state.get("arrival_dates") or {}).get(home)
-        )
-
-    for ticket_idxs, offer in zip(pattern["tickets"], combo):
+        This is exact for one-way ticket records and for any saved ticket record whose
+        displayed arrival/+N corresponds to the ticket's final slice.
+        """
         if not ticket_idxs:
-            continue
-        final_idx = ticket_idxs[-1]
-        expected = expected_by_leg.get(final_idx)
-        if not expected:
-            continue
-        actual = _actual_ticket_final_arrival_date(pattern["legs"], ticket_idxs, offer)
-        if not actual:
-            return False, ["실제 도착일 확인 불가"]
-        if actual != expected:
-            dest = pattern["legs"][final_idx].destination
-            return False, [f"{airport_label(dest)} 도착일 불일치: 실제 {actual} / 계획 {expected}"]
+            return None
+        final_leg = legs[ticket_idxs[-1]]
+        try:
+            dep_date = datetime.strptime(final_leg.departure_date, "%Y-%m-%d").date()
+            offset = int(offer.get("arrival_day_offset", 0) or 0)
+            return (dep_date + timedelta(days=offset)).isoformat()
+        except Exception:
+            return None
 
-    return True, reasons
+    def combo_matches_exact_arrival_dates(pattern, combo, generated_state):
+        reasons = []
+        stays = generated_state.get("itinerary_stays") or []
+        home = generated_state.get("home")
+        home_exact = (generated_state.get("exact_arrival_required") or {}).get(home, False)
 
+        expected_by_leg = {}
+        for i, stay in enumerate(stays):
+            if stay.get("exact_arrival"):
+                expected_by_leg[i] = stay.get("arrival_date")
+
+        if home_exact and pattern.get("legs"):
+            expected_by_leg[len(pattern["legs"]) - 1] = (
+                generated_state.get("home_final_arrival")
+                or (generated_state.get("arrival_dates") or {}).get(home)
+            )
+
+        for ticket_idxs, offer in zip(pattern["tickets"], combo):
+            if not ticket_idxs:
+                continue
+            final_idx = ticket_idxs[-1]
+            expected = expected_by_leg.get(final_idx)
+            if not expected:
+                continue
+            actual = _actual_ticket_final_arrival_date(pattern["legs"], ticket_idxs, offer)
+            if not actual:
+                return False, ["실제 도착일 확인 불가"]
+            if actual != expected:
+                dest = pattern["legs"][final_idx].destination
+                return False, [f"{airport_label(dest)} 도착일 불일치: 실제 {actual} / 계획 {expected}"]
+
+        return True, reasons
 
 with tab3:
     st.subheader("전체 발권 조합 및 가격 Ranking")
