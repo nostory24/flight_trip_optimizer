@@ -372,6 +372,86 @@ def sync_widgets_from_generated(generated):
 
     st.session_state["skip_form_autosave_once"] = True
 
+def checklist_ticket_label(legs, idxs):
+    """Use the same ticket naming semantics as the search checklist."""
+    chosen = [legs[i] for i in idxs]
+    if not chosen:
+        return ""
+
+    if len(chosen) == 1:
+        leg = chosen[0]
+        return f"[편도] {airport_label(leg.origin)} → {airport_label(leg.destination)}"
+
+    if len(chosen) == 2:
+        a, b = chosen
+        if a.origin == b.destination and a.destination == b.origin:
+            return (
+                f"[왕복] {airport_label(a.origin)} ↔ {airport_label(a.destination)} "
+                f"(가는 날 {a.departure_date} / 오는 날 {b.departure_date})"
+            )
+
+    route = " → ".join(
+        [airport_label(chosen[0].origin)]
+        + [airport_label(x.destination) for x in chosen]
+    )
+    dates = " / ".join(x.departure_date for x in chosen)
+    return f"[다구간] {route} ({dates})"
+
+
+def checklist_pattern_label(pattern):
+    """
+    Represent one complete ticketing strategy entirely in terms of the same
+    ticket units visible in `전체 검색 체크리스트`.
+    """
+    return " + ".join(
+        checklist_ticket_label(pattern["legs"], idxs)
+        for idxs in pattern.get("tickets", [])
+    )
+
+
+def pattern_display_name(pattern):
+    """
+    Human-friendly label for one complete ticketing strategy.
+    Every pattern, including a full-route one-ticket multi-city option,
+    is independently toggleable in the ranking tab.
+    """
+    tickets = pattern.get("tickets") or []
+    legs = pattern.get("legs") or []
+
+    if len(tickets) == 1 and tickets[0]:
+        idxs = tickets[0]
+        if len(idxs) == len(legs) and len(legs) > 1:
+            return "풀구간 다구간 1장"
+        if len(idxs) == 1:
+            return "편도 1장"
+        return f"다구간 1장 ({len(idxs)}구간)"
+
+    roundtrip_count = 0
+    multicity_count = 0
+    oneway_count = 0
+    for idxs in tickets:
+        if len(idxs) == 1:
+            oneway_count += 1
+        elif len(idxs) == 2:
+            a = legs[idxs[0]]
+            b = legs[idxs[1]]
+            if a.origin == b.destination and a.destination == b.origin:
+                roundtrip_count += 1
+            else:
+                multicity_count += 1
+        elif len(idxs) > 2:
+            multicity_count += 1
+
+    parts = []
+    if roundtrip_count:
+        parts.append(f"왕복 {roundtrip_count}장")
+    if multicity_count:
+        parts.append(f"다구간 {multicity_count}장")
+    if oneway_count:
+        parts.append(f"편도 {oneway_count}장")
+    return " + ".join(parts) if parts else f"티켓 {len(tickets)}장"
+
+
 def format_ticket(legs: List[Leg], idxs: List[int]):
     return " / ".join(f"{airport_label(legs[i].origin)} → {airport_label(legs[i].destination)} ({legs[i].departure_date})" for i in idxs)
 
@@ -1297,7 +1377,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.20.7 · 발권 조합 단위 포함/제외 + 다구간 세트 인식")
+st.caption("Version 4.1 · 체크리스트 기준 조합 선택/랭킹")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1730,57 +1810,19 @@ with tab1:
         rows = []
         for p in g["patterns"]:
             rows.append({
-                "조합 포함": bool(p.get("include_in_ranking", True)),
                 "ID": p["pattern_id"],
+                "조합 설명": pattern_display_name(p),
                 "Physical Route": route_key(p["route"]),
-                "유형": p["kind"],
                 "티켓 수": len(p["tickets"]),
                 "발권 묶음": " || ".join(format_ticket(p["legs"], t) for t in p["tickets"])
             })
 
-        pattern_df = pd.DataFrame(rows)
-        edited_pattern_df = st.data_editor(
-            pattern_df,
+        st.dataframe(
+            pd.DataFrame(rows),
             use_container_width=True,
-            hide_index=True,
-            disabled=["ID", "Physical Route", "유형", "티켓 수", "발권 묶음"],
-            column_config={
-                "조합 포함": st.column_config.CheckboxColumn(
-                    "조합 포함",
-                    help="체크된 발권 조합(R1-P*)만 검색 체크리스트와 최종 랭킹 계산에 사용합니다."
-                )
-            },
-            key="pattern_include_editor_v3207"
+            hide_index=True
         )
-
-        if st.button("조합 포함 설정 반영", type="primary"):
-            include_map = {
-                str(r["ID"]): bool(r["조합 포함"])
-                for _, r in edited_pattern_df.iterrows()
-            }
-            for p in st.session_state.generated["patterns"]:
-                p["include_in_ranking"] = include_map.get(
-                    p["pattern_id"], bool(p.get("include_in_ranking", True))
-                )
-            if st.session_state.get("draft_generated"):
-                for p in st.session_state["draft_generated"].get("patterns", []):
-                    p["include_in_ranking"] = include_map.get(
-                        p["pattern_id"], bool(p.get("include_in_ranking", True))
-                    )
-            save_state("generated", st.session_state.generated)
-            save_active_trip_if_any()
-            st.success(
-                f'조합 {sum(include_map.values())}/{len(include_map)}개를 랭킹 대상으로 설정했습니다.'
-            )
-            st.rerun()
-
-        included_pattern_count = sum(
-            1 for p in g["patterns"] if p.get("include_in_ranking", True)
-        )
-        st.caption(
-            f"현재 {len(g['patterns'])}개 발권 조합 중 "
-            f"**{included_pattern_count}개 조합만 계산에 포함**됩니다."
-        )
+        st.caption("조합 포함/제외는 `3. 조합/랭킹` 탭에서 가격을 보면서 선택합니다.")
 
         st.markdown("### 검색 링크")
         selected_id = st.selectbox("발권 패턴 선택", [p["pattern_id"] for p in g["patterns"]])
@@ -1810,16 +1852,9 @@ with tab2:
         # Defensive rebuild: old saved trips may contain stale revisit patterns.
         st.session_state.generated = rebuild_generated_from_saved_state(st.session_state.generated)
         patterns = st.session_state.generated["patterns"]
-        enabled_patterns = [
-            p for p in patterns if bool(p.get("include_in_ranking", True))
-        ]
-        search_tasks = collect_unique_search_tasks(enabled_patterns)
-        disabled_pattern_count = len(patterns) - len(enabled_patterns)
-        if disabled_pattern_count:
-            st.caption(
-                f"조합 계산에서 제외한 발권 패턴 {disabled_pattern_count}개에만 필요한 검색은 "
-                "체크리스트에서도 제외했습니다."
-            )
+        # Input data is collected for all patterns.
+        # Inclusion/exclusion is decided later in tab3 while viewing prices.
+        search_tasks = collect_unique_search_tasks(patterns)
 
         saved_counts = {}
         for oo in valid_offers_only(st.session_state.offers):
@@ -2269,6 +2304,64 @@ with tab3:
     if not st.session_state.generated or not st.session_state.offers:
         st.warning("경로 생성 후 비교하려는 Ticket 검색 결과를 최소 1개 이상 저장해야 합니다.")
     else:
+        st.markdown("### ✅ 가격 비교에 포함할 발권 조합")
+        st.caption(
+            "각 행은 위 `전체 검색 체크리스트`에서 입력한 항공권을 묶은 **발권 조합 한 세트**입니다. "
+            "풀구간 다구간도 체크리스트의 다구간 항목 1개로 표시되며, 체크 해제하면 랭킹에서 즉시 제외됩니다."
+        )
+
+        pattern_choice_rows = []
+        for display_no, p in enumerate(st.session_state.generated["patterns"], 1):
+            pattern_choice_rows.append({
+                "조합 포함": bool(p.get("include_in_ranking", True)),
+                "조합 번호": display_no,
+                "체크리스트 기준 조합": checklist_pattern_label(p),
+                "티켓 수": len(p["tickets"]),
+                "_pattern_id": p["pattern_id"],
+            })
+
+        edited_pattern_choices = st.data_editor(
+            pd.DataFrame(pattern_choice_rows),
+            use_container_width=True,
+            hide_index=True,
+            disabled=["조합 번호", "체크리스트 기준 조합", "티켓 수", "_pattern_id"],
+            column_config={
+                "조합 포함": st.column_config.CheckboxColumn(
+                    "조합 포함",
+                    help="전체 검색 체크리스트의 항공권 묶음을 기준으로 이 조합 전체를 가격 비교에 포함/제외합니다."
+                ),
+                "_pattern_id": None,
+            },
+            key="ranking_pattern_editor_v41"
+        )
+
+        live_include_map = {
+            str(r["_pattern_id"]): bool(r["조합 포함"])
+            for _, r in edited_pattern_choices.iterrows()
+        }
+
+        # Persist the live choice; ranking below uses the same map immediately.
+        changed = False
+        for p in st.session_state.generated["patterns"]:
+            new_value = live_include_map.get(p["pattern_id"], True)
+            if bool(p.get("include_in_ranking", True)) != new_value:
+                p["include_in_ranking"] = new_value
+                changed = True
+
+        if st.session_state.get("draft_generated"):
+            for p in st.session_state["draft_generated"].get("patterns", []):
+                p["include_in_ranking"] = live_include_map.get(
+                    p["pattern_id"], bool(p.get("include_in_ranking", True))
+                )
+
+        if changed:
+            save_state("generated", st.session_state.generated)
+            save_active_trip_if_any()
+
+        st.caption(
+            f"현재 {sum(live_include_map.values())}/{len(live_include_map)}개 발권 조합을 가격 비교에 포함합니다."
+        )
+
         st.markdown("### 🧳 수하물 옵션 반영")
         st.caption(
             "위탁수하물이 미포함인 항공권은 추가할 수하물 중량과 비용을 입력하고 "
@@ -2339,7 +2432,7 @@ with tab3:
         rejected_exact_arrival = []
         ranking_patterns = [
             p for p in st.session_state.generated["patterns"]
-            if bool(p.get("include_in_ranking", True))
+            if live_include_map.get(p["pattern_id"], True)
         ]
         st.caption(
             f"발권 조합 {len(st.session_state.generated['patterns'])}개 중 "
@@ -2396,7 +2489,8 @@ with tab3:
                         )
 
                 plans.append({
-                    "패턴ID": p["pattern_id"],
+                    "조합": checklist_pattern_label(p),
+                    "_pattern_id": p["pattern_id"],
                     "Physical Route": route_key(p["route"]),
                     "발권유형": p["kind"],
                     "티켓수": len(combo),
@@ -2448,7 +2542,7 @@ with tab3:
 
             display_cols = [
                 "현재순위", "기본순위", "순위변동표시",
-                "패턴ID", "Physical Route", "발권유형", "티켓수",
+                "조합", "Physical Route", "발권유형", "티켓수",
                 "기본총액(KRW)", "수하물추가비용(KRW)", "적용총액(KRW)",
                 "수하물", "항공편", "총표시소요시간(분)", "검색링크",
             ]
@@ -2477,7 +2571,7 @@ with tab3:
             for _, row in rdf.head(topn).iterrows():
                 top_options.append(
                     f'{int(row["현재순위"])}위 | ₩{int(row["적용총액(KRW)"]):,} | '
-                    f'{row["Physical Route"]} | {row["패턴ID"]}'
+                    f'{row["조합"]}'
                 )
 
             selected_plan_label = st.selectbox(
