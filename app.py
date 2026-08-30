@@ -468,7 +468,22 @@ def is_valid_offer(offer):
     return bool(dep and arr and price > 0)
 
 def valid_offers_only(offers):
-    return [o for o in (offers or []) if is_valid_offer(o)]
+    normalized = []
+    for o in (offers or []):
+        if not is_valid_offer(o):
+            continue
+        oo = dict(o)
+        # Backward compatibility: tickets saved before v3.20.4 are included by default.
+        if "include_in_ranking" not in oo:
+            oo["include_in_ranking"] = True
+        normalized.append(oo)
+    return normalized
+
+def ranking_offers_only(offers):
+    return [
+        o for o in valid_offers_only(offers)
+        if bool(o.get("include_in_ranking", True))
+    ]
 
 def _korean_ampm_to_24h(token: str) -> str:
     token = re.sub(r"\s+", " ", token.strip())
@@ -610,6 +625,32 @@ def parse_result_text(text: str, search_key: str, source_url: str = ""):
                 "source_url": source_url,
                 "원문": blob[:500],
             })
+    return rows
+
+
+def build_multicity_segment_rows(text: str, ticket_legs):
+    """Build editable per-leg rows for a multi-city ticket.
+
+    Route/date always come from the user's itinerary. Times are filled in
+    sequentially when they can be detected from pasted search-result text;
+    the user can correct every field before saving.
+    """
+    times = _extract_times(text or "")
+    rows = []
+    for n, leg in enumerate(ticket_legs, 1):
+        dep = times[(n-1)*2] if len(times) > (n-1)*2 else ""
+        arr = times[(n-1)*2+1] if len(times) > (n-1)*2+1 else ""
+        rows.append({
+            "leg": n,
+            "구간": f"{airport_label(leg.origin)} → {airport_label(leg.destination)}",
+            "출발일": leg.departure_date,
+            "항공사": "",
+            "출발시간": dep,
+            "도착시간": arr,
+            "도착+일": 0,
+            "경유": "",
+            "소요시간(분)": 0,
+        })
     return rows
 
 
@@ -1120,7 +1161,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.20.2 · Top 조합 구매항공권 상세")
+st.caption("Version 3.20.4 · 다구간 leg별 저장")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1792,6 +1833,10 @@ with tab2:
             if st.button("가격·시간 후보 추출"):
                 rows = parse_result_text(manual_text, skey, source_url)
                 st.session_state["parsed_rows"] = rows
+                if selected_task["type"] == "다구간":
+                    st.session_state["multicity_segment_rows"] = build_multicity_segment_rows(
+                        manual_text, selected_ticket_legs
+                    )
                 if not rows:
                     st.warning("자동 추출 후보가 없습니다. 아래 표에 직접 입력해도 됩니다.")
 
@@ -1819,6 +1864,29 @@ with tab2:
                 key="offer_editor_v3"
             )
 
+            multicity_segments_edited = None
+            if selected_task["type"] == "다구간":
+                st.markdown("#### ✈️ 다구간 티켓의 실제 구간별 항공편")
+                st.caption(
+                    "다구간 총가격은 위 표에서 1회만 입력하고, 아래에는 각 leg의 실제 항공사/시간을 입력하세요. "
+                    "구간과 출발일은 여행 일정에서 고정됩니다."
+                )
+                seg_rows = st.session_state.get("multicity_segment_rows")
+                if not seg_rows or len(seg_rows) != len(selected_ticket_legs):
+                    seg_rows = build_multicity_segment_rows(manual_text, selected_ticket_legs)
+                seg_df = pd.DataFrame(seg_rows)
+                multicity_segments_edited = st.data_editor(
+                    seg_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["leg", "구간", "출발일"],
+                    column_config={
+                        "도착+일": st.column_config.NumberColumn(min_value=0, max_value=2, step=1),
+                        "소요시간(분)": st.column_config.NumberColumn(min_value=0, step=5),
+                    },
+                    key="multicity_segment_editor_v3203"
+                )
+
             if st.button("선택 항공편 저장", type="primary"):
                 saved = 0
                 invalid_skipped = 0
@@ -1840,8 +1908,37 @@ with tab2:
                         "baggage_extra_kg": int(r.get("추가수하물kg",0) or 0),
                         "baggage_extra_price": int(r.get("추가수하물가격",0) or 0),
                         "include_baggage": bool(r.get("수하물포함체크",False)),
+                        "include_in_ranking": True,
                         "source_url": str(r.get("source_url","")),
                     }
+
+                    if selected_task["type"] == "다구간" and multicity_segments_edited is not None:
+                        segments = []
+                        for seg_i, seg_r in multicity_segments_edited.iterrows():
+                            leg_obj = selected_ticket_legs[int(seg_i)]
+                            segments.append({
+                                "origin": leg_obj.origin,
+                                "destination": leg_obj.destination,
+                                "departure_date": leg_obj.departure_date,
+                                "airline": str(seg_r.get("항공사", "") or ""),
+                                "departure_time": str(seg_r.get("출발시간", "") or ""),
+                                "arrival_time": str(seg_r.get("도착시간", "") or ""),
+                                "arrival_day_offset": int(seg_r.get("도착+일", 0) or 0),
+                                "stops": str(seg_r.get("경유", "") or ""),
+                                "duration_min": int(seg_r.get("소요시간(분)", 0) or 0),
+                            })
+                        # A multi-city ticket is one purchase, but contains multiple physical flights.
+                        candidate["segments"] = segments
+                        candidate["ticket_type"] = "다구간"
+                        if segments:
+                            candidate["airline"] = " / ".join(dict.fromkeys(
+                                s["airline"] for s in segments if s["airline"]
+                            )) or "다구간"
+                            candidate["departure_time"] = segments[0]["departure_time"]
+                            candidate["arrival_time"] = segments[-1]["arrival_time"]
+                            candidate["arrival_day_offset"] = segments[-1]["arrival_day_offset"]
+                            candidate["duration_min"] = sum(s["duration_min"] for s in segments)
+                            candidate["stops"] = "다구간"
 
                     if not is_valid_offer(candidate):
                         invalid_skipped += 1
@@ -1854,6 +1951,7 @@ with tab2:
                 autosave()
 
                 if saved:
+                    st.session_state.pop("multicity_segment_rows", None)
                     # Do not modify the text_area key in the same run after instantiation.
                     # Mark it for clearing, then rerun; the next run clears it before widget creation.
                     st.session_state["clear_paste_after_save"] = True
@@ -1864,7 +1962,7 @@ with tab2:
                         f"{invalid_skipped}개 행은 출발시간/도착시간/가격이 없어 저장하지 않았습니다."
                     )
 
-        st.markdown("### 저장된 항공편")
+        st.markdown("### 저장된 항공편 · 계산 포함 선택")
 
         legacy_invalid_count = len(st.session_state.offers) - len(valid_offers_only(st.session_state.offers))
         if legacy_invalid_count > 0:
@@ -1873,17 +1971,34 @@ with tab2:
             st.info(f"기존 빈 데이터 {legacy_invalid_count}개를 자동 정리했습니다.")
 
         if st.session_state.offers:
-            odf = pd.DataFrame(st.session_state.offers)
+            normalized_saved_offers = valid_offers_only(st.session_state.offers)
+            odf = pd.DataFrame(normalized_saved_offers)
+            odf["계산 포함"] = odf["include_in_ranking"].astype(bool)
             odf["적용가격"] = odf["price_krw"] + odf.apply(
                 lambda x: x["baggage_extra_price"] if x["include_baggage"] else 0, axis=1)
+
             edited_offers = st.data_editor(
-                odf, use_container_width=True,
-                column_config={"include_baggage": st.column_config.CheckboxColumn("수하물 합산")},
-                key="saved_offer_editor_v3"
+                odf,
+                use_container_width=True,
+                column_config={
+                    "계산 포함": st.column_config.CheckboxColumn(
+                        "계산 포함",
+                        help="체크된 티켓만 3. 조합/랭킹 계산에 사용합니다."
+                    ),
+                    "include_in_ranking": None,
+                    "include_baggage": st.column_config.CheckboxColumn("수하물 합산"),
+                },
+                key="saved_offer_editor_v3204"
             )
-            if st.button("수하물 체크/수정 반영"):
-                st.session_state.offers = edited_offers.drop(columns=["적용가격"], errors="ignore").to_dict("records")
+
+            if st.button("티켓 설정 반영"):
+                updated_records = []
+                for rec in edited_offers.drop(columns=["적용가격"], errors="ignore").to_dict("records"):
+                    rec["include_in_ranking"] = bool(rec.pop("계산 포함", True))
+                    updated_records.append(rec)
+                st.session_state.offers = updated_records
                 autosave()
+                st.success("티켓 계산 포함 여부와 수하물 설정을 반영했습니다.")
                 st.rerun()
             if st.button("저장 항공편 전체 삭제"):
                 st.session_state.offers = []
@@ -1921,7 +2036,11 @@ with tab2:
         final_leg = legs[ticket_idxs[-1]]
         try:
             dep_date = datetime.strptime(final_leg.departure_date, "%Y-%m-%d").date()
-            offset = int(offer.get("arrival_day_offset", 0) or 0)
+            segments = offer.get("segments") or []
+            if segments:
+                offset = int(segments[-1].get("arrival_day_offset", 0) or 0)
+            else:
+                offset = int(offer.get("arrival_day_offset", 0) or 0)
             return (dep_date + timedelta(days=offset)).isoformat()
         except Exception:
             return None
@@ -1981,6 +2100,7 @@ with tab3:
                 "출발": o.get("departure_time", ""),
                 "도착": o.get("arrival_time", ""),
                 "기본가격(KRW)": int(o.get("price_krw", 0) or 0),
+                "계산 포함": bool(o.get("include_in_ranking", True)),
                 "수하물 상태": o.get("baggage_note", "") or "확인 필요",
                 "추가수하물(kg)": int(o.get("baggage_extra_kg", 0) or 0),
                 "추가수하물비용(KRW)": int(o.get("baggage_extra_price", 0) or 0),
@@ -1997,6 +2117,10 @@ with tab3:
             column_config={
                 "offer_uid": None,
                 "기본가격(KRW)": st.column_config.NumberColumn(format="%d"),
+                "계산 포함": st.column_config.CheckboxColumn(
+                    "계산 포함",
+                    help="체크된 티켓만 조합/랭킹에 사용합니다."
+                ),
                 "추가수하물(kg)": st.column_config.NumberColumn(min_value=0, step=1),
                 "추가수하물비용(KRW)": st.column_config.NumberColumn(min_value=0, step=1000, format="%d"),
                 "총액에 포함": st.column_config.CheckboxColumn(
@@ -2015,6 +2139,7 @@ with tab3:
                 r = uid_to_row.get(uid)
                 if r is not None:
                     o = dict(o)
+                    o["include_in_ranking"] = bool(r.get("계산 포함", True))
                     o["baggage_note"] = str(r.get("수하물 상태", "") or "")
                     o["baggage_extra_kg"] = int(r.get("추가수하물(kg)", 0) or 0)
                     o["baggage_extra_price"] = int(r.get("추가수하물비용(KRW)", 0) or 0)
@@ -2026,10 +2151,15 @@ with tab3:
             st.rerun()
 
         offer_map = {}
-        for idx, o in enumerate(valid_offers_only(st.session_state.offers)):
+        ranking_offers = ranking_offers_only(st.session_state.offers)
+        for idx, o in enumerate(ranking_offers):
             oo = dict(o)
             oo["_uid"] = offer_uid(o, idx)
             offer_map.setdefault(oo["search_key"], []).append(oo)
+
+        excluded_count = len(valid_offers_only(st.session_state.offers)) - len(ranking_offers)
+        if excluded_count > 0:
+            st.caption(f"계산 제외 티켓 {excluded_count}개는 현재 조합/랭킹에서 제외했습니다.")
 
         plans = []
         rejected_exact_arrival = []
@@ -2260,6 +2390,26 @@ with tab3:
                                 f"**추가 수하물:** +{int(x.get('baggage_extra_kg',0) or 0)}kg "
                                 f"/ +₩{bag_fee:,}"
                             )
+                        segments = x.get("segments") or []
+                        if segments:
+                            st.markdown("**이 다구간 티켓에 포함된 실제 항공편**")
+                            seg_detail_rows = []
+                            for sn, seg in enumerate(segments, 1):
+                                off = int(seg.get("arrival_day_offset", 0) or 0)
+                                seg_detail_rows.append({
+                                    "leg": sn,
+                                    "구간": f'{airport_label(seg.get("origin",""))} → {airport_label(seg.get("destination",""))}',
+                                    "출발일": seg.get("departure_date", ""),
+                                    "항공사": seg.get("airline", "") or "확인 필요",
+                                    "출발시간": seg.get("departure_time", "") or "확인 필요",
+                                    "도착시간": (seg.get("arrival_time", "") or "확인 필요") + (f" (+{off}일)" if off else ""),
+                                    "경유": seg.get("stops", "") or "확인 필요",
+                                    "소요시간": (
+                                        f'{int(seg.get("duration_min",0) or 0)//60}시간 {int(seg.get("duration_min",0) or 0)%60}분'
+                                        if int(seg.get("duration_min",0) or 0) else "확인 필요"
+                                    ),
+                                })
+                            st.dataframe(pd.DataFrame(seg_detail_rows), use_container_width=True, hide_index=True)
                         if x.get("source_url"):
                             st.write(f"**검색 결과 URL:** {x.get('source_url')}")
 
