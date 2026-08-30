@@ -396,293 +396,6 @@ def collect_unique_search_tasks(patterns):
         key=lambda x: (order.get(x["type"], 9), x["title"], x["summary"])
     )
 
-
-def _normalize_route_text(s):
-    return re.sub(r"\s+", " ", str(s or "")).upper()
-
-def _city_aliases(code):
-    aliases = {code.upper()}
-    label = AIRPORT_LABELS.get(code.upper(), "")
-    if label:
-        aliases.add(label.upper())
-        for part in re.split(r"[/\s]+", label):
-            if part:
-                aliases.add(part.upper())
-
-    common = {
-        "ICN": {"서울", "인천", "SEOUL", "INCHEON"},
-        "GMP": {"서울", "김포", "SEOUL", "GIMPO"},
-        "IST": {"이스탄불", "ISTANBUL"},
-        "SAW": {"이스탄불", "SABIHA"},
-        "ATH": {"아테네", "ATHENS"},
-        "JTR": {"산토리니", "SANTORINI"},
-        "DXB": {"두바이", "DUBAI"},
-        "DOH": {"도하", "DOHA"},
-        "CDG": {"파리", "PARIS"},
-        "LHR": {"런던", "LONDON"},
-        "FCO": {"로마", "ROME"},
-    }
-    aliases.update(x.upper() for x in common.get(code.upper(), set()))
-    return aliases
-
-def _contains_city(text, code):
-    t = _normalize_route_text(text)
-    return any(alias in t for alias in _city_aliases(code))
-
-def _date_text_variants(iso_date):
-    if not iso_date:
-        return set()
-    try:
-        dt = datetime.strptime(str(iso_date), "%Y-%m-%d")
-    except Exception:
-        return {str(iso_date)}
-    return {
-        dt.strftime("%Y-%m-%d"),
-        dt.strftime("%Y/%m/%d"),
-        dt.strftime("%Y.%m.%d"),
-        f"{dt.month}/{dt.day}",
-        f"{dt.month}.{dt.day}",
-        f"{dt.month}월 {dt.day}일",
-        f"{dt.month}월{dt.day}일",
-    }
-
-def _contains_date(text, iso_date):
-    raw = str(text or "")
-    return any(v in raw for v in _date_text_variants(iso_date))
-
-def _task_signature(task):
-    chosen = [task["legs"][i] for i in task["idxs"]]
-    if not chosen:
-        return None
-    return {
-        "type": task["type"],
-        "legs": [(x.origin, x.destination, x.departure_date) for x in chosen],
-        "first_origin": chosen[0].origin,
-        "first_destination": chosen[0].destination,
-        "final_destination": chosen[-1].destination,
-        "dates": [x.departure_date for x in chosen],
-    }
-
-def _extract_explicit_route_pairs(text_blob):
-    """
-    Extract explicit origin -> destination pairs only from route-like lines.
-    Transit/layover airports elsewhere in the result must not determine the task.
-    """
-    raw = str(text_blob or "")
-    pairs = []
-
-    # Build alias -> IATA lookup.
-    alias_to_code = {}
-    for code in AIRPORT_LABELS:
-        for alias in _city_aliases(code):
-            if len(alias) >= 2:
-                alias_to_code[alias.upper()] = code
-
-    # Also support common codes that may not be in AIRPORT_LABELS.
-    for code in ["ICN","GMP","PUS","CJU","IST","SAW","ATH","JTR","DXB","DOH",
-                 "AUH","PEK","PKX","CAN","HKG","SIN","BKK","NRT","HND","KIX",
-                 "LHR","CDG","FCO","FRA","MUC","AMS","MAD","BCN","VIE","ZRH",
-                 "JFK","LAX","SFO"]:
-        alias_to_code[code] = code
-
-    route_separators = ["→", "->", ">", "–", "—", "↔", "<->", "왕복"]
-
-    def identify_city(fragment):
-        up = _normalize_route_text(fragment)
-        # Prefer literal IATA in parentheses / standalone.
-        for code in alias_to_code.values():
-            if re.search(rf"(?<![A-Z]){re.escape(code)}(?![A-Z])", up):
-                return code
-        # Then Korean/English city aliases.
-        matches = []
-        for alias, code in alias_to_code.items():
-            if alias and alias in up:
-                matches.append((len(alias), code))
-        if matches:
-            matches.sort(reverse=True)
-            return matches[0][1]
-        return None
-
-    # Only inspect short/header-like lines for route identification.
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or len(line) > 180:
-            continue
-
-        matched_sep = None
-        for sep in route_separators:
-            if sep in line:
-                matched_sep = sep
-                break
-        if not matched_sep:
-            continue
-
-        if matched_sep == "왕복":
-            # e.g. 서울(ICN) 아테네(ATH) 왕복
-            prefix = line.split("왕복", 1)[0]
-            found = []
-            for code in alias_to_code.values():
-                if _contains_city(prefix, code) and code not in found:
-                    found.append(code)
-            if len(found) == 2:
-                pairs.append((found[0], found[1], "왕복"))
-            continue
-
-        parts = line.split(matched_sep, 1)
-        if len(parts) != 2:
-            continue
-        a = identify_city(parts[0])
-        b = identify_city(parts[1])
-        if a and b and a != b:
-            typ = "왕복" if matched_sep in ["↔", "<->"] else "편도"
-            pairs.append((a, b, typ))
-
-    # Deduplicate preserving order.
-    out = []
-    for p in pairs:
-        if p not in out:
-            out.append(p)
-    return out
-
-
-def _task_endpoints(task):
-    chosen = [task["legs"][i] for i in task["idxs"]]
-    if not chosen:
-        return None
-
-    typ = task["type"]
-    if typ == "편도":
-        leg = chosen[0]
-        return {
-            "type": "편도",
-            "origin": leg.origin,
-            "destination": leg.destination,
-            "dates": [leg.departure_date],
-        }
-
-    if typ == "왕복":
-        outbound = chosen[0]
-        inbound = chosen[1]
-        return {
-            "type": "왕복",
-            "origin": outbound.origin,
-            "destination": outbound.destination,
-            "dates": [outbound.departure_date, inbound.departure_date],
-        }
-
-    return {
-        "type": "다구간",
-        "origin": chosen[0].origin,
-        "destination": chosen[-1].destination,
-        "legs": [(x.origin, x.destination) for x in chosen],
-        "dates": [x.departure_date for x in chosen],
-    }
-
-
-def match_pasted_text_to_search_task(text_blob, search_tasks):
-    """
-    Strict matcher.
-
-    Important safety rule:
-    A route is never inferred from transit airports, airline text, or departure date alone.
-    We only auto-save when the pasted text contains an explicit route pair/header that
-    exactly matches one checklist task.
-    """
-    blob = str(text_blob or "")
-    if not blob.strip():
-        return None, "텍스트가 비어 있습니다.", []
-
-    route_pairs = _extract_explicit_route_pairs(blob)
-    if not route_pairs:
-        return (
-            None,
-            "출발지→도착지 구간을 텍스트에서 확정할 수 없습니다. "
-            "검색결과를 복사할 때 상단의 구간명(예: ATH → JTR 또는 아테네 → 산토리니)도 함께 포함하세요.",
-            [],
-        )
-
-    candidates = []
-
-    for task in search_tasks:
-        sig = _task_endpoints(task)
-        if not sig:
-            continue
-
-        for a, b, pasted_type in route_pairs:
-            route_match = False
-
-            if sig["type"] == "편도":
-                route_match = (
-                    pasted_type != "왕복"
-                    and a == sig["origin"]
-                    and b == sig["destination"]
-                )
-
-            elif sig["type"] == "왕복":
-                route_match = (
-                    pasted_type == "왕복"
-                    and (
-                        (a == sig["origin"] and b == sig["destination"])
-                        or (b == sig["origin"] and a == sig["destination"])
-                    )
-                )
-
-            else:
-                # Multi-city requires explicit evidence for all legs.
-                pasted_directed = [(x, y) for x, y, t in route_pairs if t != "왕복"]
-                route_match = all(pair in pasted_directed for pair in sig.get("legs", []))
-
-            if not route_match:
-                continue
-
-            # Date is secondary validation, not a substitute for route matching.
-            date_hits = sum(1 for d in sig["dates"] if _contains_date(blob, d))
-
-            # If the copied text contains any recognizable date, require at least one expected date.
-            date_like = bool(
-                re.search(r"\b20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\b", blob)
-                or re.search(r"\b\d{1,2}[/.]\d{1,2}\b", blob)
-                or re.search(r"\d{1,2}월\s*\d{1,2}일", blob)
-            )
-            if date_like and date_hits == 0:
-                continue
-
-            candidates.append((task, a, b, pasted_type, date_hits))
-
-    # Unique task only. Never guess between multiple matches.
-    unique = {}
-    for item in candidates:
-        task = item[0]
-        unique[task["key"]] = item
-
-    if len(unique) == 0:
-        found = ", ".join(
-            f"{a} {'↔' if t == '왕복' else '→'} {b}"
-            for a, b, t in route_pairs
-        )
-        return (
-            None,
-            f"인식한 구간({found})과 현재 체크리스트의 구간/날짜가 일치하지 않아 저장하지 않습니다.",
-            [],
-        )
-
-    if len(unique) > 1:
-        return (
-            None,
-            "같은 구간에 해당하는 체크리스트가 여러 개라 자동 연결하지 않았습니다. "
-            "검색 날짜가 보이도록 상단 검색조건까지 함께 복사하세요.",
-            list(unique.values())[:5],
-        )
-
-    task, a, b, pasted_type, date_hits = next(iter(unique.values()))
-    arrow = "↔" if pasted_type == "왕복" else "→"
-    reason = f"구간 정확 일치: {a} {arrow} {b}"
-    if date_hits:
-        reason += f" / 날짜 {date_hits}개 일치"
-    return task, reason, [next(iter(unique.values()))]
-
-
-
 def money_to_int(s):
     digits = re.sub(r"[^\d]", "", str(s or ""))
     return int(digits) if digits else 0
@@ -1340,7 +1053,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.21 · 출발지/도착지 정확매칭 + 오저장 차단")
+st.caption("Version 3.19 · 이름 있는 여행 실시간 자동저장")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1800,61 +1513,74 @@ with tab2:
         st.progress(done_count / len(search_tasks) if search_tasks else 0)
         st.caption(f"전체 진행상황: {done_count}/{len(search_tasks)}개 검색 완료")
 
-        # No manual ticket selection.
-        # The pasted search result determines which checklist item receives the data.
-        st.markdown("### 📋 검색 결과 붙여넣기")
-        st.caption(
-            "항공권 항목을 직접 선택할 필요 없습니다. "
-            "검색 결과의 출발지·도착지·날짜를 읽어 체크리스트 항목에 자동 연결합니다."
+        # Select a concrete search task directly.
+        task_labels = [
+            f'{i+1}. [{t["type"]}] {t["title"]} — {t["summary"]}'
+            for i, t in enumerate(search_tasks)
+        ]
+        selected_task_label = st.selectbox(
+            "지금 검색/입력할 항공권 선택",
+            task_labels,
+            key="search_task_selector"
+        )
+        selected_task = search_tasks[task_labels.index(selected_task_label)]
+
+        p2_legs = selected_task["legs"]
+        idxs = selected_task["idxs"]
+        skey = selected_task["key"]
+        search_rows = selected_task["rows"]
+        search_summary = selected_task["summary"]
+
+        st.markdown("### 🔎 지금 검색해야 할 항공권")
+        st.warning(
+            f'**{selected_task["type"]} 검색**\n\n'
+            f'**{selected_task["title"]}**\n\n'
+            + search_summary
         )
 
-        manual_text = st.text_area(
-            "검색 결과 텍스트 붙여넣기  ⓘ",
-            height=260,
-            placeholder="""예:
-서울(ICN) ↔ 아테네(ATH) 왕복
-가는 날 2026-12-23
-오는 날 2027-01-02
-
-Turkish Airlines
-11:30 → 18:20
-15시간 50분
-1회 경유 IST
-₩820,000"""
+        st.dataframe(
+            pd.DataFrame(search_rows),
+            use_container_width=True,
+            hide_index=True
         )
 
-        matched_task = None
-        match_reason = ""
-        if manual_text.strip():
-            matched_task, match_reason, match_candidates = match_pasted_text_to_search_task(
-                manual_text, search_tasks
+        if selected_task["type"] == "편도":
+            st.caption("Skyscanner / Google Flights에서 편도(One-way)로 검색하세요.")
+        elif selected_task["type"] == "왕복":
+            a = p2_legs[idxs[0]]
+            b = p2_legs[idxs[1]]
+            st.caption(
+                f"Skyscanner / Google Flights에서 왕복(Round-trip)으로 검색하세요. "
+                f"가는 날 {a.departure_date} / 오는 날 {b.departure_date}"
             )
-
-        if matched_task:
-            st.success(
-                f"자동 연결됨: [{matched_task['type']}] {matched_task['title']}\n\n"
-                f"{matched_task['summary']}\n\n"
-                f"판별 근거: {match_reason}"
-            )
-            selected_task = matched_task
-            p2_legs = selected_task["legs"]
-            idxs = selected_task["idxs"]
-            skey = selected_task["key"]
-            search_rows = selected_task["rows"]
-            search_summary = selected_task["summary"]
         else:
-            selected_task = None
-            skey = None
-            search_rows = []
-            search_summary = ""
-            if manual_text.strip():
-                st.warning(match_reason)
-        if matched_task:
-            st.markdown("### 🔎 자동 인식된 입력 대상")
-            st.dataframe(
-                pd.DataFrame(search_rows),
-                use_container_width=True,
-                hide_index=True
+            st.caption("Skyscanner / Google Flights에서 다구간(Multi-city)으로 검색하세요.")
+
+        selected_ticket_legs = [p2_legs[i] for i in idxs]
+        c_search1, c_search2 = st.columns(2)
+        with c_search1:
+            st.link_button(
+                "Google Flights에서 이 티켓 검색",
+                google_multicity_url(selected_ticket_legs)
+                if len(selected_ticket_legs) > 1
+                else google_oneway_url(
+                    selected_ticket_legs[0].origin,
+                    selected_ticket_legs[0].destination,
+                    selected_ticket_legs[0].departure_date
+                ),
+                use_container_width=True
+            )
+        with c_search2:
+            st.link_button(
+                "Skyscanner에서 이 티켓 검색",
+                skyscanner_multicity_url(selected_ticket_legs)
+                if len(selected_ticket_legs) > 1
+                else skyscanner_oneway_url(
+                    selected_ticket_legs[0].origin,
+                    selected_ticket_legs[0].destination,
+                    selected_ticket_legs[0].departure_date
+                ),
+                use_container_width=True
             )
 
         # Keep the input area compact. Detailed guidance is available on demand.
@@ -1864,13 +1590,7 @@ Turkish Airlines
             st.markdown("""
 **검색 결과에서 아래 정보가 보이도록 복사해서 붙여넣으세요.**
 
-**가장 중요**
-- **검색 구간명**: 예) `ATH → JTR`, `아테네 → 산토리니`, `ICN ↔ ATH 왕복`
-- 검색 날짜
-
-구간명이 없으면 잘못된 항공권에 저장되는 것을 막기 위해 **자동 저장하지 않습니다.**
-
-**필수 항공편 정보**
+**필수**
 - 항공사
 - 출발시간
 - 도착시간
@@ -1901,27 +1621,39 @@ Emirates
         with st.expander("기술 정보 (평소에는 볼 필요 없음)", expanded=False):
             st.code(skey, language=None)
 
+        manual_text = st.text_area(
+            "검색 결과 텍스트 붙여넣기  ⓘ",
+            height=260,
+            placeholder="""예:
+Emirates
+오후 11:40 → 오후 2:25 +1
+20시간 45분
+1회 경유 DXB
+₩823,600
+
+터키항공
+오전 12:05 → 오전 5:55
+11시간 50분
+직항
+₩840,200"""
+        )
+
         if st.button("가격·시간 후보 추출"):
-            if not matched_task:
-                st.warning("항공권 구간이 확실하게 자동 인식되지 않아 추출/저장을 진행하지 않습니다.")
-                st.session_state["parsed_rows"] = []
-            else:
-                rows = parse_result_text(manual_text, skey, source_url)
-                st.session_state["parsed_rows"] = rows
-                st.session_state["parsed_search_key"] = skey
-                if not rows:
-                    st.warning("자동 추출 후보가 없습니다. 아래 표에 직접 입력해도 됩니다.")
+            rows = parse_result_text(manual_text, skey, source_url)
+            st.session_state["parsed_rows"] = rows
+            if not rows:
+                st.warning("자동 추출 후보가 없습니다. 아래 표에 직접 입력해도 됩니다.")
 
         rows = st.session_state.get("parsed_rows", [])
         if rows:
             df = pd.DataFrame(rows)
         else:
-            df = pd.DataFrame(columns=[
-                "선택", "search_key", "항공사", "출발시간", "도착시간",
-                "도착+일", "소요시간(분)", "경유", "가격(KRW)",
-                "수하물", "추가수하물kg", "추가수하물가격",
-                "수하물포함체크", "source_url", "원문"
-            ])
+            df = pd.DataFrame([{
+                "선택": True, "search_key": skey, "항공사": "", "출발시간": "", "도착시간": "",
+                "도착+일": 0, "소요시간(분)": 0, "경유": "", "가격(KRW)": 0,
+                "수하물": "", "추가수하물kg": 0, "추가수하물가격": 0, "수하물포함체크": False,
+                "source_url": source_url, "원문": ""
+            }])
 
         edited = st.data_editor(
             df,
@@ -1937,23 +1669,6 @@ Emirates
         )
 
         if st.button("선택 항공편 저장", type="primary"):
-            # Re-evaluate the pasted text at save time. Never trust stale UI state.
-            save_match, save_reason, _ = match_pasted_text_to_search_task(
-                manual_text, search_tasks
-            )
-            if not save_match:
-                st.warning(f"저장 차단: {save_reason}")
-                st.stop()
-
-            if not matched_task or not skey or save_match["key"] != skey:
-                st.warning("저장 직전 구간 검증이 일치하지 않아 저장하지 않았습니다. 다시 추출하세요.")
-                st.stop()
-
-            parsed_key = st.session_state.get("parsed_search_key")
-            if parsed_key and parsed_key != skey:
-                st.warning("붙여넣은 내용이 변경되어 이전 추출 결과와 구간이 달라졌습니다. 다시 추출하세요.")
-                st.stop()
-
             saved = 0
             invalid_skipped = 0
 
@@ -1988,8 +1703,6 @@ Emirates
             autosave()
 
             if saved:
-                st.session_state.pop("parsed_rows", None)
-                st.session_state.pop("parsed_search_key", None)
                 st.success(f"{saved}개 유효 항공편 저장 완료")
             if invalid_skipped:
                 st.warning(
