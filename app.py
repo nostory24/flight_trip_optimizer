@@ -167,82 +167,6 @@ def generate_ticket_patterns_from_legs(route: List[str], legs: List[Leg]):
     return unique
 
 
-def build_side_trip_alternative(home: str, ordered_stays: list, home_departure: str):
-    """
-    Build one practical side-trip alternative for the LAST excursion before home.
-
-    Example input stays:
-      IST -> ATH -> JTR
-    Base route:
-      ICN -> IST -> ATH -> JTR -> ICN
-
-    Alternative:
-      ICN -> IST -> ATH -> JTR -> ATH -> ICN
-
-    The return from JTR to ATH uses JTR's departure date.
-    ATH -> ICN also uses that same date as the earliest return-home search date.
-    This alternative is generated only for the last two distinct stay cities and
-    does not create arbitrary revisits to older cities.
-    """
-    if len(ordered_stays) < 2:
-        return None
-
-    base = ordered_stays[-2]
-    side = ordered_stays[-1]
-
-    if base["city"] == side["city"]:
-        return None
-
-    # If user already explicitly added the base city again after side city,
-    # there is no need to synthesize this alternative.
-    # (ordered_stays is chronological; here side is currently last.)
-    base_city = base["city"]
-    side_city = side["city"]
-    side_dep = side["departure_date"]
-
-    route = [home] + [s["city"] for s in ordered_stays[:-1]] + [side_city, base_city, home]
-
-    legs = []
-    if ordered_stays:
-        legs.append(Leg(home, ordered_stays[0]["city"], home_departure))
-        for i in range(len(ordered_stays) - 2):
-            legs.append(Leg(
-                ordered_stays[i]["city"],
-                ordered_stays[i+1]["city"],
-                ordered_stays[i]["departure_date"],
-            ))
-
-        # base -> side
-        legs.append(Leg(base_city, side_city, base["departure_date"]))
-        # side -> base
-        legs.append(Leg(side_city, base_city, side_dep))
-        # base -> home
-        legs.append(Leg(base_city, home, side_dep))
-
-    # Ticket patterns for this synthesized physical alternative.
-    patterns = []
-    # All contiguous partitions.
-    for groups in all_contiguous_partitions(len(legs)):
-        tickets = [list(range(s, e)) for s, e in groups]
-        patterns.append(("side_trip_contiguous", tickets))
-
-    # Explicit side-trip round trip + other legs separately.
-    if len(legs) >= 3:
-        out_idx = len(legs) - 3
-        back_idx = len(legs) - 2
-        tickets = [[i] for i in range(len(legs)) if i not in (out_idx, back_idx)]
-        tickets.append([out_idx, back_idx])
-        patterns.append(("side_trip_roundtrip", tickets))
-
-    seen, unique = set(), []
-    for kind, tickets in patterns:
-        key = tuple(sorted(tuple(sorted(t)) for t in tickets))
-        if key not in seen:
-            seen.add(key)
-            unique.append((kind, tickets))
-
-    return route, legs, unique
-
 def all_contiguous_partitions(nlegs: int):
     if nlegs <= 0:
         return []
@@ -338,18 +262,6 @@ def rebuild_generated_from_saved_state(generated):
         "tickets": tickets,
         "pattern_id": f"R1-P{i+1}",
     } for i, (kind, tickets) in enumerate(defs)]
-
-    side_alt = build_side_trip_alternative(home, ordered, home_departure)
-    if side_alt:
-        side_route, side_legs, side_defs = side_alt
-        for i, (kind, tickets) in enumerate(side_defs):
-            patterns.append({
-                "route": side_route,
-                "legs": side_legs,
-                "kind": kind,
-                "tickets": tickets,
-                "pattern_id": f"R2-P{i+1}",
-            })
 
     rebuilt = dict(generated)
     rebuilt["itinerary_stays"] = [dict(s) for s in stays]
@@ -1208,7 +1120,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.19.7 · 저장 실행순서 수정")
+st.caption("Version 3.20.0 · 일정에 없는 역방향 후보 제거")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1566,18 +1478,19 @@ with tab1:
             if not current_draft:
                 raise ValueError("현재 여행 일정 snapshot을 만들지 못했습니다.")
 
-            # Safety check: every visible itinerary stay must be present.
-            visible_city_sequence = [s.get("city") for s in itinerary_stays]
-            draft_city_sequence = [
-                s.get("city")
-                for s in (current_draft.get("itinerary_stays") or [])
-            ]
-            if visible_city_sequence != draft_city_sequence:
+            # The draft above was rebuilt from the CURRENT form in this same run.
+            # Do not compare it with a differently ordered/raw itinerary list:
+            # build_route_and_legs_from_stays() intentionally orders stays by date,
+            # so a raw-vs-ordered comparison can falsely reject a valid save.
+            # Save the freshly rebuilt current draft directly.
+            # Basic integrity: the snapshot must contain every current stay record.
+            draft_stays = current_draft.get("itinerary_stays") or []
+            if len(draft_stays) != len(itinerary_stays):
                 raise ValueError(
-                    "현재 화면의 도시 일정과 저장 snapshot이 일치하지 않아 저장을 중단했습니다."
+                    f"현재 일정 {len(itinerary_stays)}개 중 snapshot에는 "
+                    f"{len(draft_stays)}개만 있어 저장을 중단했습니다."
                 )
 
-            # Save the exact current draft, never an older generated state.
             st.session_state.generated = current_draft
             saved_id = save_named_trip(
                 pending_manual_save["trip_name"],
@@ -1616,23 +1529,6 @@ with tab1:
         } for i, (kind, tickets) in enumerate(defs)]
         routes = [route]
 
-        # Practical last-city side-trip alternative.
-        # e.g. ATH -> JTR -> ICN can additionally be compared as
-        # ATH <-> JTR + ATH -> ICN.
-        side_alt = build_side_trip_alternative(
-            home, ordered_stays, departure_dates_by_city[home]
-        )
-        if side_alt:
-            side_route, side_legs, side_defs = side_alt
-            routes.append(side_route)
-            for i, (kind, tickets) in enumerate(side_defs):
-                generated.append({
-                    "route": side_route,
-                    "legs": side_legs,
-                    "kind": kind,
-                    "tickets": tickets,
-                    "pattern_id": f"R2-P{i+1}"
-                })
         st.session_state.generated = {
             "home": home,
             "visits": sorted_visits,
@@ -1738,9 +1634,16 @@ with tab2:
 
         # Select only among ticket searches that do not yet have valid saved offers.
         # Completed checklist items disappear from this selector automatically.
+        # Keep the ORIGINAL checklist number even after completed items disappear.
+        numbered_search_tasks = [
+            (original_no, task)
+            for original_no, task in enumerate(search_tasks, 1)
+        ]
+
         pending_search_tasks = [
-            t for t in search_tasks
-            if saved_counts.get(t["key"], 0) == 0
+            (original_no, task)
+            for original_no, task in numbered_search_tasks
+            if saved_counts.get(task["key"], 0) == 0
         ]
 
         if not pending_search_tasks:
@@ -1748,8 +1651,8 @@ with tab2:
             st.stop()
 
         task_labels = [
-            f'{i+1}. [{t["type"]}] {t["title"]} — {t["summary"]}'
-            for i, t in enumerate(pending_search_tasks)
+            f'{original_no}. [{t["type"]}] {t["title"]} — {t["summary"]}'
+            for original_no, t in pending_search_tasks
         ]
 
         # Reset selector if its previous value belonged to a task that just became completed.
@@ -1762,7 +1665,9 @@ with tab2:
             task_labels,
             key="search_task_selector"
         )
-        selected_task = pending_search_tasks[task_labels.index(selected_task_label)]
+        selected_original_no, selected_task = pending_search_tasks[
+            task_labels.index(selected_task_label)
+        ]
 
         p2_legs = selected_task["legs"]
         idxs = selected_task["idxs"]
