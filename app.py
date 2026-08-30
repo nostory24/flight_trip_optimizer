@@ -1377,7 +1377,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 4.1 · 체크리스트 기준 조합 선택/랭킹")
+st.caption("Version 4.2 · 체크리스트 기준 항공권 삭제")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -2220,10 +2220,59 @@ with tab2:
                 ).to_dict("records")
                 autosave()
                 st.rerun()
-            if st.button("저장 항공편 전체 삭제"):
-                st.session_state.offers = []
-                autosave()
-                st.rerun()
+
+            st.markdown("#### 🗑️ 체크리스트 항공권 삭제")
+            st.caption(
+                "현재 `전체 검색 체크리스트`에 있는 항목만 삭제할 수 있습니다. "
+                "예전 일정에서 남은 다른 search_key 데이터는 이 삭제 목록에 표시하지 않습니다."
+            )
+
+            checklist_delete_options = []
+            checklist_delete_map = {}
+            for task_no, task in enumerate(search_tasks, 1):
+                cnt = sum(
+                    1 for o in valid_offers_only(st.session_state.offers)
+                    if o.get("search_key") == task["key"]
+                )
+                if cnt <= 0:
+                    continue
+
+                label = (
+                    f'{task_no}. [{task["type"]}] {task["title"]} '
+                    f'— 저장 후보 {cnt}개'
+                )
+                checklist_delete_options.append(label)
+                checklist_delete_map[label] = task["key"]
+
+            if checklist_delete_options:
+                delete_label = st.selectbox(
+                    "삭제할 체크리스트 항공권",
+                    checklist_delete_options,
+                    key="checklist_offer_delete_selector_v42"
+                )
+                delete_key = checklist_delete_map[delete_label]
+
+                confirm_offer_delete = st.checkbox(
+                    "선택한 체크리스트 항공권의 저장 후보를 모두 삭제",
+                    key="checklist_offer_delete_confirm_v42"
+                )
+
+                if st.button(
+                    "선택 항공권 삭제",
+                    disabled=not confirm_offer_delete,
+                    type="secondary"
+                ):
+                    before_count = len(st.session_state.offers)
+                    st.session_state.offers = [
+                        o for o in st.session_state.offers
+                        if o.get("search_key") != delete_key
+                    ]
+                    deleted_count = before_count - len(st.session_state.offers)
+                    autosave()
+                    st.success(f"{deleted_count}개 저장 후보를 삭제했습니다.")
+                    st.rerun()
+            else:
+                st.caption("현재 체크리스트에서 삭제할 저장 항공권이 없습니다.")
         else:
             st.caption("아직 저장된 항공편이 없습니다.")
 
