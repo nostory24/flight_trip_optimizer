@@ -1043,6 +1043,7 @@ def load_named_trip(trip_id):
     if not generated_raw:
         raise ValueError("저장된 여행 일정 데이터가 없습니다.")
 
+    st.session_state.pop("pending_manual_trip_save", None)
     st.session_state.active_trip_id = trip_id
     st.session_state.active_trip_name = row["trip_name"]
     st.session_state.offers = offers
@@ -1207,7 +1208,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.19.6 · 현재 화면 일정 그대로 저장")
+st.caption("Version 3.19.7 · 저장 실행순서 수정")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1236,22 +1237,24 @@ with st.sidebar:
     c_save1, c_save2 = st.columns(2)
     with c_save1:
         if st.button("💾 저장", use_container_width=True):
-            try:
-                current_id = st.session_state.get("active_trip_id")
-                saved_id = save_named_trip(new_trip_name, trip_id=current_id)
-                st.session_state.active_trip_id = saved_id
-                st.session_state.active_trip_name = new_trip_name.strip()
-                if st.session_state.get("draft_generated"):
-                    st.session_state.generated = st.session_state["draft_generated"]
-                st.success("여행 저장 완료")
-                st.rerun()
-            except Exception as e:
-                st.error(f"저장 실패: {e}")
+            name_for_save = (new_trip_name or "").strip()
+            if not name_for_save:
+                st.error("여행 이름을 입력하세요.")
+            else:
+                # IMPORTANT:
+                # Sidebar is executed before the main travel form.
+                # Therefore do NOT save here. Queue the request and let the
+                # main form save AFTER all current city/date widgets are read.
+                st.session_state["pending_manual_trip_save"] = {
+                    "trip_name": name_for_save,
+                    "trip_id": st.session_state.get("active_trip_id"),
+                }
 
     with c_save2:
         if st.button("➕ 새 여행", use_container_width=True):
             st.session_state.generated = None
             st.session_state.pop("draft_generated", None)
+            st.session_state.pop("pending_manual_trip_save", None)
             st.session_state.offers = []
             st.session_state.active_trip_id = None
             st.session_state.active_trip_name = None
@@ -1553,6 +1556,51 @@ with tab1:
         flex=flex,
         topn=topn,
     )
+
+    # Complete a manual save only AFTER the complete current form has been read
+    # and draft_generated has been rebuilt from the visible values.
+    pending_manual_save = st.session_state.pop("pending_manual_trip_save", None)
+    if pending_manual_save:
+        try:
+            current_draft = st.session_state.get("draft_generated")
+            if not current_draft:
+                raise ValueError("현재 여행 일정 snapshot을 만들지 못했습니다.")
+
+            # Safety check: every visible itinerary stay must be present.
+            visible_city_sequence = [s.get("city") for s in itinerary_stays]
+            draft_city_sequence = [
+                s.get("city")
+                for s in (current_draft.get("itinerary_stays") or [])
+            ]
+            if visible_city_sequence != draft_city_sequence:
+                raise ValueError(
+                    "현재 화면의 도시 일정과 저장 snapshot이 일치하지 않아 저장을 중단했습니다."
+                )
+
+            # Save the exact current draft, never an older generated state.
+            st.session_state.generated = current_draft
+            saved_id = save_named_trip(
+                pending_manual_save["trip_name"],
+                trip_id=pending_manual_save.get("trip_id"),
+            )
+            st.session_state.active_trip_id = saved_id
+            st.session_state.active_trip_name = pending_manual_save["trip_name"]
+            st.session_state["last_autosave_at"] = datetime.now().isoformat(timespec="seconds")
+            st.session_state["last_autosave_error"] = None
+            st.session_state["manual_save_success_message"] = (
+                f'{pending_manual_save["trip_name"]} 저장 완료'
+            )
+            st.rerun()
+        except Exception as exc:
+            st.session_state["manual_save_error_message"] = str(exc)
+            st.rerun()
+
+    if st.session_state.pop("manual_save_success_message", None):
+        st.success("여행 저장 완료")
+    manual_save_error = st.session_state.pop("manual_save_error_message", None)
+    if manual_save_error:
+        st.error(f"저장 실패: {manual_save_error}")
+
 
     if st.button("경로·발권 후보 생성", type="primary"):
         route, legs, ordered_stays = build_route_and_legs_from_stays(
