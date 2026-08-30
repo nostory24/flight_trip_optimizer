@@ -1142,7 +1142,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.19.1 · 마지막 도시 사이드트립 발권 후보 복원")
+st.caption("Version 3.19.3 · 완료 항공권 선택목록 자동 제외")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1620,17 +1620,33 @@ with tab2:
         st.progress(done_count / len(search_tasks) if search_tasks else 0)
         st.caption(f"전체 진행상황: {done_count}/{len(search_tasks)}개 검색 완료")
 
-        # Select a concrete search task directly.
+        # Select only among ticket searches that do not yet have valid saved offers.
+        # Completed checklist items disappear from this selector automatically.
+        pending_search_tasks = [
+            t for t in search_tasks
+            if saved_counts.get(t["key"], 0) == 0
+        ]
+
+        if not pending_search_tasks:
+            st.success("체크리스트의 모든 항공권 입력이 완료되었습니다.")
+            st.stop()
+
         task_labels = [
             f'{i+1}. [{t["type"]}] {t["title"]} — {t["summary"]}'
-            for i, t in enumerate(search_tasks)
+            for i, t in enumerate(pending_search_tasks)
         ]
+
+        # Reset selector if its previous value belonged to a task that just became completed.
+        current_selector = st.session_state.get("search_task_selector")
+        if current_selector not in task_labels:
+            st.session_state["search_task_selector"] = task_labels[0]
+
         selected_task_label = st.selectbox(
             "지금 검색/입력할 항공권 선택",
             task_labels,
             key="search_task_selector"
         )
-        selected_task = search_tasks[task_labels.index(selected_task_label)]
+        selected_task = pending_search_tasks[task_labels.index(selected_task_label)]
 
         p2_legs = selected_task["legs"]
         idxs = selected_task["idxs"]
@@ -1731,6 +1747,7 @@ Emirates
         manual_text = st.text_area(
             "검색 결과 텍스트 붙여넣기  ⓘ",
             height=260,
+            key="search_result_paste_text",
             placeholder="""예:
 Emirates
 오후 11:40 → 오후 2:25 +1
@@ -1810,7 +1827,12 @@ Emirates
             autosave()
 
             if saved:
+                # 저장 성공 시 입력창과 추출 결과를 초기화하여 다음 항공권 입력 준비
+                st.session_state["search_result_paste_text"] = ""
+                st.session_state.pop("parsed_rows", None)
+                st.session_state.pop("parsed_search_key", None)
                 st.success(f"{saved}개 유효 항공편 저장 완료")
+                st.rerun()
             if invalid_skipped:
                 st.warning(
                     f"{invalid_skipped}개 행은 출발시간/도착시간/가격이 없어 저장하지 않았습니다."
