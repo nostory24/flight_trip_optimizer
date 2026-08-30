@@ -1142,7 +1142,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.19.3 · 완료 항공권 선택목록 자동 제외")
+st.caption("Version 3.19.4 · 저장 후 입력창 초기화 오류 수정")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1744,6 +1744,12 @@ Emirates
         with st.expander("기술 정보 (평소에는 볼 필요 없음)", expanded=False):
             st.code(skey, language=None)
 
+        # Streamlit widget state must be cleared BEFORE the widget is instantiated.
+        if st.session_state.pop("clear_paste_after_save", False):
+            st.session_state["search_result_paste_text"] = ""
+            st.session_state.pop("parsed_rows", None)
+            st.session_state.pop("parsed_search_key", None)
+
         manual_text = st.text_area(
             "검색 결과 텍스트 붙여넣기  ⓘ",
             height=260,
@@ -1827,10 +1833,9 @@ Emirates
             autosave()
 
             if saved:
-                # 저장 성공 시 입력창과 추출 결과를 초기화하여 다음 항공권 입력 준비
-                st.session_state["search_result_paste_text"] = ""
-                st.session_state.pop("parsed_rows", None)
-                st.session_state.pop("parsed_search_key", None)
+                # Do not modify the text_area key in the same run after instantiation.
+                # Mark it for clearing, then rerun; the next run clears it before widget creation.
+                st.session_state["clear_paste_after_save"] = True
                 st.success(f"{saved}개 유효 항공편 저장 완료")
                 st.rerun()
             if invalid_skipped:
