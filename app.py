@@ -352,10 +352,43 @@ def rebuild_generated_from_saved_state(generated):
             })
 
     rebuilt = dict(generated)
-    rebuilt["itinerary_stays"] = ordered
+    rebuilt["itinerary_stays"] = [dict(s) for s in stays]
     rebuilt["visits"] = [s["city"] for s in ordered]
     rebuilt["patterns"] = patterns
     return rebuilt
+
+
+def clear_trip_form_widget_state():
+    fixed_keys = {
+        "home_input",
+        "visit_input",
+        "flex_input",
+        "topn_input",
+        "home_departure_date",
+        "home_final_arrival_date",
+        "exact_home_arrival",
+    }
+    dynamic_prefixes = (
+        "repeat_count_",
+        "arr_",
+        "dep_",
+        "exact_arrival_",
+        "add_repeat_",
+        "remove_repeat_",
+    )
+    for key in list(st.session_state.keys()):
+        if key in fixed_keys or key.startswith(dynamic_prefixes):
+            st.session_state.pop(key, None)
+
+def _strict_saved_date(value, field_name):
+    if value is None or str(value).strip() == "":
+        raise ValueError(f"저장된 여행의 {field_name} 날짜가 비어 있습니다.")
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except Exception as exc:
+        raise ValueError(
+            f"저장된 여행의 {field_name} 날짜 형식이 잘못되었습니다: {value}"
+        ) from exc
 
 def sync_widgets_from_generated(generated):
     if not generated:
@@ -365,7 +398,7 @@ def sync_widgets_from_generated(generated):
     dep = generated.get("dates") or {}
     arr = generated.get("arrival_dates") or {}
     exact = generated.get("exact_arrival_required") or {}
-    stays = generated.get("itinerary_stays") or []
+    stays = [dict(s) for s in (generated.get("itinerary_stays") or [])]
 
     if not stays:
         counts = {}
@@ -379,37 +412,48 @@ def sync_widgets_from_generated(generated):
                 "exact_arrival": bool(exact.get(city, False)),
             })
 
+    clear_trip_form_widget_state()
+
     unique_cities = []
     for s in stays:
-        if s["city"] not in unique_cities:
-            unique_cities.append(s["city"])
+        city = s.get("city")
+        if city and city not in unique_cities:
+            unique_cities.append(city)
 
     st.session_state["home_input"] = home
     st.session_state["visit_input"] = ",".join(unique_cities)
     st.session_state["flex_input"] = int(generated.get("flex", 1) or 0)
     st.session_state["topn_input"] = int(generated.get("topn", 10) or 10)
 
-    def to_date(v, fallback):
-        try:
-            return datetime.strptime(str(v), "%Y-%m-%d").date()
-        except Exception:
-            return fallback
-
-    st.session_state["home_departure_date"] = to_date(dep.get(home), date.today())
-    st.session_state["home_final_arrival_date"] = to_date(
-        generated.get("home_final_arrival") or arr.get(home), date.today()
+    st.session_state["home_departure_date"] = _strict_saved_date(
+        dep.get(home), f"{home} 출발"
+    )
+    st.session_state["home_final_arrival_date"] = _strict_saved_date(
+        generated.get("home_final_arrival") or arr.get(home),
+        f"{home} 최종 도착"
     )
     st.session_state["exact_home_arrival"] = bool(exact.get(home, False))
 
     counts = {}
     for s in stays:
-        city = s["city"]
+        city = s.get("city")
+        if not city:
+            continue
         counts[city] = counts.get(city, 0) + 1
         n = counts[city]
-        st.session_state[f"repeat_count_{city}"] = counts[city]
-        st.session_state[f"arr_{city}_{n}"] = to_date(s.get("arrival_date"), date.today())
-        st.session_state[f"dep_{city}_{n}"] = to_date(s.get("departure_date"), date.today())
-        st.session_state[f"exact_arrival_{city}_{n}"] = bool(s.get("exact_arrival", False))
+
+        st.session_state[f"repeat_count_{city}"] = n
+        st.session_state[f"arr_{city}_{n}"] = _strict_saved_date(
+            s.get("arrival_date"), f"{city} 방문 #{n} 도착"
+        )
+        st.session_state[f"dep_{city}_{n}"] = _strict_saved_date(
+            s.get("departure_date"), f"{city} 방문 #{n} 출발"
+        )
+        st.session_state[f"exact_arrival_{city}_{n}"] = bool(
+            s.get("exact_arrival", False)
+        )
+
+    st.session_state["skip_form_autosave_once"] = True
 
 def format_ticket(legs: List[Leg], idxs: List[int]):
     return " / ".join(f"{airport_label(legs[i].origin)} → {airport_label(legs[i].destination)} ({legs[i].departure_date})" for i in idxs)
@@ -889,9 +933,15 @@ def _make_trip_id():
     return datetime.now().strftime("trip_%Y%m%d_%H%M%S_%f")
 
 def current_trip_snapshot():
+    # Manual save must capture the CURRENT visible form, not merely the last
+    # state produced by pressing "경로·발권 후보 생성".
+    generated_for_save = (
+        st.session_state.get("draft_generated")
+        or st.session_state.get("generated")
+    )
     return {
-        "generated": _jsonable(st.session_state.get("generated")),
-        "offers": _jsonable(st.session_state.get("offers", [])),
+        "generated": _jsonable(generated_for_save),
+        "offers": _jsonable(valid_offers_only(st.session_state.get("offers", []))),
     }
 
 def save_named_trip(trip_name, trip_id=None):
@@ -987,21 +1037,24 @@ def load_named_trip(trip_id):
         return None
 
     data = json.loads(row["snapshot_json"])
-    generated = _restore_objects(data.get("generated"))
+    generated_raw = _restore_objects(data.get("generated"))
     offers = _restore_objects(data.get("offers", []))
 
-    # Rebuild stale route/ticket objects from the saved schedule.
-    generated = rebuild_generated_from_saved_state(generated)
+    if not generated_raw:
+        raise ValueError("저장된 여행 일정 데이터가 없습니다.")
 
-    st.session_state.generated = generated
-    st.session_state.offers = offers
     st.session_state.active_trip_id = trip_id
     st.session_state.active_trip_name = row["trip_name"]
+    st.session_state.offers = offers
 
-    # Synchronize visible form widgets with the loaded trip.
-    sync_widgets_from_generated(generated)
+    # Restore exact saved date values first.
+    sync_widgets_from_generated(generated_raw)
 
-    # Keep current autosave state in sync too.
+    # Rebuild only derived route/ticket pattern objects.
+    generated = rebuild_generated_from_saved_state(generated_raw)
+    st.session_state.generated = generated
+    st.session_state["draft_generated"] = generated
+
     save_state("generated", generated)
     save_all_offers(offers)
     st.session_state["last_autosave_at"] = datetime.now().isoformat(timespec="seconds")
@@ -1076,10 +1129,10 @@ def autosave_active_trip_from_form(
     automatically refreshed after date/city/exact-arrival/Top-N changes.
     Unnamed/new workspaces are intentionally not persisted as named trips.
     """
+    skip_db_write = st.session_state.pop("skip_form_autosave_once", False)
+
     trip_id = st.session_state.get("active_trip_id")
     trip_name = st.session_state.get("active_trip_name")
-    if not trip_id or not trip_name or DB_INIT_ERROR:
-        return
 
     try:
         route, legs, ordered_stays = build_route_and_legs_from_stays(
@@ -1096,13 +1149,13 @@ def autosave_active_trip_from_form(
             "pattern_id": f"R1-P{i+1}",
         } for i, (kind, tickets) in enumerate(defs)]
 
-        st.session_state.generated = {
+        current_draft = {
             "home": home,
             "visits": [s["city"] for s in ordered_stays],
             "dates": dict(departure_dates_by_city),
             "arrival_dates": dict(arrival_dates_by_city),
             "exact_arrival_required": dict(exact_arrival_required),
-            "itinerary_stays": ordered_stays,
+            "itinerary_stays": [dict(s) for s in ordered_stays],
             "home_final_arrival": arrival_dates_by_city.get(home),
             "flex": int(flex),
             "topn": int(topn),
@@ -1111,8 +1164,20 @@ def autosave_active_trip_from_form(
             "patterns": patterns,
         }
 
-        # Current autosave + named-trip snapshot.
-        save_state("generated", st.session_state.generated)
+        # Always keep the latest visible form in memory, even before the trip
+        # has ever been named/saved.
+        st.session_state["draft_generated"] = current_draft
+        st.session_state.generated = current_draft
+
+        # Skip DB write once immediately after loading, but keep the draft.
+        if skip_db_write:
+            return
+
+        # Only named trips are automatically persisted.
+        if not trip_id or not trip_name or DB_INIT_ERROR:
+            return
+
+        save_state("generated", current_draft)
         save_all_offers(valid_offers_only(st.session_state.get("offers", [])))
         save_named_trip(trip_name, trip_id=trip_id)
 
@@ -1142,7 +1207,7 @@ if "active_trip_name" not in st.session_state:
     st.session_state.active_trip_name = None
 
 st.title("✈️ Flight Trip Optimizer")
-st.caption("Version 3.19.4 · 저장 후 입력창 초기화 오류 수정")
+st.caption("Version 3.19.6 · 현재 화면 일정 그대로 저장")
 st.caption("유료 항공 API·Tesseract 없이 사용하는 개인용 여행 항공권 비교 도구")
 
 with st.sidebar:
@@ -1176,6 +1241,8 @@ with st.sidebar:
                 saved_id = save_named_trip(new_trip_name, trip_id=current_id)
                 st.session_state.active_trip_id = saved_id
                 st.session_state.active_trip_name = new_trip_name.strip()
+                if st.session_state.get("draft_generated"):
+                    st.session_state.generated = st.session_state["draft_generated"]
                 st.success("여행 저장 완료")
                 st.rerun()
             except Exception as e:
@@ -1184,6 +1251,7 @@ with st.sidebar:
     with c_save2:
         if st.button("➕ 새 여행", use_container_width=True):
             st.session_state.generated = None
+            st.session_state.pop("draft_generated", None)
             st.session_state.offers = []
             st.session_state.active_trip_id = None
             st.session_state.active_trip_name = None

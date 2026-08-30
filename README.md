@@ -1,10 +1,28 @@
-# Flight Trip Optimizer v3.19.4
+# Flight Trip Optimizer v3.19.6
 
-Hotfix:
-- `StreamlitAPIException: st.session_state.search_result_paste_text cannot be modified after the widget ... is instantiated` 수정
-- 저장 성공 시 text_area 값을 같은 실행에서 직접 수정하지 않음
-- 대신 clear flag 설정 → st.rerun() → 다음 실행에서 widget 생성 전에 입력창/추출결과 초기화
-- v3.19.3의 완료 항공권 선택목록 자동 제외 기능 유지
+## 산토리니/날짜가 저장 후 사라지는 문제 수정
 
-배포:
+원인:
+사이드바의 여행 `저장` 버튼이 현재 화면의 입력값이 아니라,
+마지막으로 생성되어 있던 `st.session_state.generated`를 snapshot으로 저장했습니다.
+따라서 도시/날짜를 수정한 뒤 경로 생성 버튼을 다시 누르지 않으면
+최신 도시나 날짜가 저장에서 빠질 수 있었습니다.
+
+수정:
+- 화면의 현재 도시/도착일/출발일/재방문/정확도착 값을 매 rerun마다 `draft_generated`에 저장
+- 이름 없는 새 여행도 최신 draft는 메모리에 계속 유지
+- `여행 저장` 버튼은 항상 `draft_generated`를 우선 저장
+- 경로 생성 버튼을 다시 누르지 않아도 현재 화면 그대로 저장
+- 저장된 여행 불러오기 시 draft도 동일하게 초기화
+- 새 여행 시작 시 draft 삭제
+- v3.19.5 날짜 원본 복원 보호 유지
+- v3.19.4 저장 후 입력창 초기화 유지
+
+검증 방법:
+1. IST, ATH, JTR를 넣고 날짜 설정
+2. 경로 생성 버튼과 무관하게 여행 이름으로 저장
+3. 새 여행
+4. 저장 여행 불러오기
+5. IST, ATH, JTR와 각 날짜가 동일하게 복원되는지 확인
+
 GitHub app.py 교체 → Commit/Push → Render 자동배포.
